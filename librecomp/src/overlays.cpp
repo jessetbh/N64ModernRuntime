@@ -146,6 +146,15 @@ std::span<const RelocEntry> recomp::overlays::get_section_relocs(uint16_t code_s
     return {};
 }
 
+size_t recomp::overlays::num_code_sections() {
+    return sections_info.num_code_sections;
+}
+
+const SectionTableEntry& recomp::overlays::get_code_section(uint16_t code_section_index) {
+    assert(code_section_index < sections_info.num_code_sections);
+    return sections_info.code_sections[code_section_index];
+}
+
 void recomp::overlays::add_loaded_function(int32_t ram, recomp_func_t* func) {
     func_map[ram] = func;
 }

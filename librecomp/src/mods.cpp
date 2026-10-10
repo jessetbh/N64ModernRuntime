@@ -1680,7 +1680,28 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_mo
             return ret;
         }
 
+        // [wcw romhack] Keep the unpatched code bytes to find the functions the patch changes.
+        std::vector<uint8_t> unpatched_code_rom(decompressed_rom.begin(), decompressed_rom.end());
+
         recomp::set_rom_contents(std::move(patched_rom));
+
+        // [wcw romhack] The ROM was replaced, so the decompressed view would reference the freed
+        // unpatched ROM: point it at the patched contents (hooks are regenerated from it too).
+        if (game_entry.has_compressed_code) {
+            decompressed_rom_data = (game_entry.decompression_routine != nullptr) ?
+                game_entry.decompression_routine(recomp::get_rom()) : std::vector<uint8_t>{};
+            decompressed_rom = std::span{decompressed_rom_data};
+        }
+        else {
+            decompressed_rom = recomp::get_rom();
+        }
+
+        std::vector<ModLoadErrorDetails> code_errors = regenerate_rom_patch_code(mod.manifest.mod_id, unpatched_code_rom, decompressed_rom, base_patched_funcs);
+        if (!code_errors.empty()) {
+            ret.insert(ret.end(), code_errors.begin(), code_errors.end());
+            unload_mods();
+            return ret;
+        }
     }
 
     // Check that mod dependencies are met.
@@ -2064,6 +2085,99 @@ std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle> apply_regenlist(Regenera
     }
 
     return regenerated_code_handle;
+}
+
+// [wcw romhack] A ROM patch can change code as well as data, but the recompiled functions are
+// built from the unpatched ROM. Every recompiled function whose ROM bytes the patch changed is
+// recompiled from the patched ROM with the live recompiler and replaces the static one. Only
+// in-place edits are found this way: code the patch adds or moves outside the known function
+// boundaries is not (it needs a full recompile of the hacked ROM).
+std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::regenerate_rom_patch_code(
+    const std::string& mod_id,
+    std::span<const uint8_t> unpatched_rom,
+    std::span<const uint8_t> patched_rom,
+    const std::unordered_map<recomp_func_t*, recomp::overlays::BasePatchedFunction>& base_patched_funcs)
+{
+    RegeneratedList regenlist{};
+    size_t num_skipped = 0;
+    for (size_t section_index = 0; section_index < recomp::overlays::num_code_sections(); section_index++) {
+        const SectionTableEntry& section = recomp::overlays::get_code_section(static_cast<uint16_t>(section_index));
+        bool section_added = false;
+        for (size_t func_index = 0; func_index < section.num_funcs; func_index++) {
+            const FuncEntry& func = section.funcs[func_index];
+            // A size of 0 means the function has no ROM code (e.g. a native reimplementation).
+            if (func.rom_size == 0) {
+                continue;
+            }
+
+            const size_t start = size_t(section.rom_addr) + func.offset;
+            const size_t end = start + func.rom_size;
+            if ((end > unpatched_rom.size()) || (end > patched_rom.size()) ||
+                (memcmp(unpatched_rom.data() + start, patched_rom.data() + start, func.rom_size) == 0))
+            {
+                continue;
+            }
+
+            // Functions replaced by the base recomp keep the replacement.
+            if (base_patched_funcs.contains(func.func)) {
+                fprintf(stderr, "[romhack] %s: 0x%08X changed but is replaced by the base recomp; keeping the replacement\n",
+                    mod_id.c_str(), section.ram_addr + func.offset);
+                num_skipped++;
+                continue;
+            }
+
+            if (!section_added) {
+                regenlist.sections.emplace_back(RegeneratedSection{
+                    .rom_addr = section.rom_addr,
+                    .ram_addr = section.ram_addr,
+                    .original_index = static_cast<uint16_t>(section_index),
+                    .first_func_index = regenlist.functions.size(),
+                    .first_reloc_index = regenlist.relocs.size(),
+                    .relocatable = section.num_relocs != 0
+                });
+                section_added = true;
+            }
+
+            regenlist.functions.emplace_back(RegeneratedFunction{
+                .section_offset = func.offset,
+                .size = func.rom_size
+            });
+            regenlist.func_ptrs.push_back(func.func);
+
+            for (size_t reloc_index = 0; reloc_index < section.num_relocs; reloc_index++) {
+                const RelocEntry& reloc = section.relocs[reloc_index];
+                if ((reloc.offset >= func.offset) && (reloc.offset < func.offset + func.rom_size)) {
+                    regenlist.relocs.emplace_back(RegeneratedReloc{
+                        .section_offset = reloc.offset,
+                        .target_section = reloc.target_section,
+                        .target_section_offset = reloc.target_section_offset,
+                        .type = reloc.type
+                    });
+                }
+            }
+        }
+    }
+
+    fprintf(stderr, "[romhack] %s: %zu changed function(s) to recompile from the patch, %zu kept\n",
+        mod_id.c_str(), regenlist.functions.size(), num_skipped);
+    if (regenlist.functions.empty()) {
+        return {};
+    }
+
+    for (const RegeneratedSection& section : regenlist.sections) {
+        const size_t last = (&section == &regenlist.sections.back()) ? regenlist.functions.size() : (&section + 1)->first_func_index;
+        for (size_t i = section.first_func_index; i < last; i++) {
+            fprintf(stderr, "[romhack]   0x%08X (%u bytes)\n", section.ram_addr + regenlist.functions[i].section_offset, regenlist.functions[i].size);
+        }
+    }
+
+    rom_patch_code_handle = apply_regenlist(regenlist, patched_rom);
+    if (!rom_patch_code_handle || !rom_patch_code_handle->good()) {
+        rom_patch_code_handle.reset();
+        return { ModLoadErrorDetails{ mod_id, ModLoadError::FailedToLoadPatch, "could not recompile the code it changes" } };
+    }
+
+    return {};
 }
 
 std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::regenerate_with_hooks(

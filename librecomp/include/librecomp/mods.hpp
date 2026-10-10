@@ -397,6 +397,12 @@ namespace recomp {
                 const std::unordered_map<uint32_t, uint16_t>& section_vrom_map,
                 const std::unordered_map<recomp_func_t*, overlays::BasePatchedFunction>& base_patched_funcs,
                 std::span<const uint8_t> decompressed_rom);
+            // [wcw romhack] Recompiles the functions a ROM patch mod changed (see mods.cpp).
+            std::vector<ModLoadErrorDetails> regenerate_rom_patch_code(
+                const std::string& mod_id,
+                std::span<const uint8_t> unpatched_rom,
+                std::span<const uint8_t> patched_rom,
+                const std::unordered_map<recomp_func_t*, overlays::BasePatchedFunction>& base_patched_funcs);
             void dirty_mod_configuration_thread_process();
             void rebuild_mod_order_lookup();
 
@@ -429,6 +435,8 @@ namespace recomp {
             std::unique_ptr<LiveRecompilerCodeHandle> regenerated_code_handle;
             // Code handle for base patched code that was regenerated to add hooks.
             std::unique_ptr<LiveRecompilerCodeHandle> base_patched_code_handle;
+            // [wcw romhack] Code handle for functions recompiled from a ROM patch mod's changed code.
+            std::unique_ptr<LiveRecompilerCodeHandle> rom_patch_code_handle;
             // Map of hook definition to the entry hook slot's index.
             std::unordered_map<HookDefinition, size_t> hook_slots;
             // Tracks which hook slots have already been processed. Used to regenerate vanilla functions as needed
