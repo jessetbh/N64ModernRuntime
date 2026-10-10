@@ -635,6 +635,10 @@ namespace recomp {
         void close_mods();
         std::filesystem::path get_mods_directory();
         std::optional<ModDetails> get_details_for_mod(const std::string& mod_id);
+        // [wcw romhack] Save subfolder for the running game: the id of the active ROM-patch mod,
+        // empty when none is active. A hack can change the save layout, so its saves (and the
+        // pak images next to them) are kept apart from the stock game's.
+        std::u8string get_rom_patch_save_subfolder();
         std::vector<ModDetails> get_all_mod_details(const std::string& mod_game_id);
         size_t game_mode_count(const std::string& mod_game_id, bool include_disabled);
         recomp::Version get_mod_version(size_t mod_index);

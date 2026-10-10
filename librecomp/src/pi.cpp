@@ -9,6 +9,7 @@
 #include "librecomp/game.hpp"
 #include "librecomp/files.hpp"
 #include "librecomp/overlays.hpp"
+#include "librecomp/mods.hpp"
 #include <ultramodern/ultra64.h>
 #include <ultramodern/ultramodern.hpp>
 
@@ -273,7 +274,8 @@ void read_save_file() {
 }
 
 void ultramodern::init_saving(RDRAM_ARG1) {
-    set_save_file_path(u8"", recomp::current_game_id());
+    // [wcw romhack] A ROM-patch mod's saves live in saves/<mod id>/.
+    set_save_file_path(recomp::mods::get_rom_patch_save_subfolder(), recomp::current_game_id());
 
     save_context.save_buffer.resize(get_save_size(recomp::get_save_type()));
 

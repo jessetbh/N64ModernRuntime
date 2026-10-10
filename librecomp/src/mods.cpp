@@ -1571,8 +1571,16 @@ void recomp::mods::ModContext::set_latest_game_mode_id(const std::string& game_m
     mod_configuration_thread_queue.enqueue(ModConfigSetLatestGamemode());
 }
 
+// [wcw romhack] The active ROM-patch mod's id, as the save subfolder (see get_rom_patch_save_subfolder).
+static std::u8string rom_patch_save_subfolder{};
+
+std::u8string recomp::mods::get_rom_patch_save_subfolder() {
+    return rom_patch_save_subfolder;
+}
+
 std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_mods(const GameEntry& game_entry, const std::string& game_mode_id, uint8_t* rdram, int32_t load_address, uint32_t& ram_used) {
     std::vector<recomp::mods::ModLoadErrorDetails> ret{};
+    rom_patch_save_subfolder.clear();
     ram_used = 0;
     num_events = recomp::overlays::num_base_events();
     loaded_code_mods.clear();
@@ -1684,6 +1692,7 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_mo
         std::vector<uint8_t> unpatched_code_rom(decompressed_rom.begin(), decompressed_rom.end());
 
         recomp::set_rom_contents(std::move(patched_rom));
+        rom_patch_save_subfolder = std::u8string{ reinterpret_cast<const char8_t*>(mod.manifest.mod_id.data()), mod.manifest.mod_id.size() };
 
         // [wcw romhack] The ROM was replaced, so the decompressed view would reference the freed
         // unpatched ROM: point it at the patched contents (hooks are regenerated from it too).
