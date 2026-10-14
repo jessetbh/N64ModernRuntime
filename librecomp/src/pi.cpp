@@ -306,6 +306,7 @@ void ultramodern::join_saving_thread() {
             save_buffer_updated = true;
         }
         if (save_buffer_updated) {
+            fprintf(stderr, "[wcw] shutdown: flushing save writes made after quit\n");
             update_save_file();
         }
     }
