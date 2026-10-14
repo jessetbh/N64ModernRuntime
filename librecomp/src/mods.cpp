@@ -2096,6 +2096,15 @@ std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle> apply_regenlist(Regenera
     return regenerated_code_handle;
 }
 
+// [wcw romhack] The game's offline-repaired functions (register_repaired_functions).
+static std::unordered_set<recomp_func_t*> repaired_functions{};
+static recomp::mods::RepairedFunctionPolicy repaired_function_policy = recomp::mods::RepairedFunctionPolicy::Warn;
+
+void recomp::mods::register_repaired_functions(std::span<recomp_func_t* const> funcs, RepairedFunctionPolicy policy) {
+    repaired_functions = std::unordered_set<recomp_func_t*>(funcs.begin(), funcs.end());
+    repaired_function_policy = policy;
+}
+
 // [wcw romhack] A ROM patch can change code as well as data, but the recompiled functions are
 // built from the unpatched ROM. Every recompiled function whose ROM bytes the patch changed is
 // recompiled from the patched ROM with the live recompiler and replaces the static one. Only
@@ -2109,6 +2118,7 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::regener
 {
     RegeneratedList regenlist{};
     size_t num_skipped = 0;
+    std::vector<uint32_t> repaired_changed{};
     for (size_t section_index = 0; section_index < recomp::overlays::num_code_sections(); section_index++) {
         const SectionTableEntry& section = recomp::overlays::get_code_section(static_cast<uint16_t>(section_index));
         bool section_added = false;
@@ -2133,6 +2143,11 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::regener
                     mod_id.c_str(), section.ram_addr + func.offset);
                 num_skipped++;
                 continue;
+            }
+
+            // Repaired offline by the port: recompiling it from the patch drops the repair.
+            if (repaired_functions.contains(func.func)) {
+                repaired_changed.push_back(section.ram_addr + func.offset);
             }
 
             if (!section_added) {
@@ -2171,6 +2186,22 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::regener
         mod_id.c_str(), regenlist.functions.size(), num_skipped);
     if (regenlist.functions.empty()) {
         return {};
+    }
+
+    if (!repaired_changed.empty()) {
+        std::string addresses{};
+        for (uint32_t addr : repaired_changed) {
+            char text[16];
+            snprintf(text, sizeof(text), "%s0x%08X", addresses.empty() ? "" : ", ", addr);
+            addresses += text;
+            fprintf(stderr, "[romhack] %s: 0x%08X was repaired by the port offline; recompiling it from the patch drops that repair\n",
+                mod_id.c_str(), addr);
+        }
+
+        if (repaired_function_policy == RepairedFunctionPolicy::Refuse) {
+            return { ModLoadErrorDetails{ mod_id, ModLoadError::FailedToLoadPatch,
+                "changes " + std::to_string(repaired_changed.size()) + " function(s) the port repaired (" + addresses + "); it needs a full recompile" } };
+        }
     }
 
     for (const RegeneratedSection& section : regenlist.sections) {
