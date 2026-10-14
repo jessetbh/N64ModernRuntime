@@ -846,12 +846,15 @@ void recomp::start(
     uint8_t* rdram;
     bool alloc_failed;
 #ifdef _WIN32
-    rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
-    DWORD old_protect = 0;
+    // [wcw fix] Reserve the whole range but commit only mem_size (aki-roadmap#7). Committing all of allocation_size
+    // (4 GB) charged it to the process's private bytes and the system commit limit even though the guard region past
+    // mem_size is PAGE_NOACCESS and never touched: a fresh game showed ~4.5 GB private bytes with RT off. Reserved,
+    // uncommitted pages fault on access just like committed PAGE_NOACCESS ones, so invalid addresses are still caught.
+    rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_RESERVE, PAGE_NOACCESS));
     alloc_failed = (rdram == nullptr);
     if (!alloc_failed) {
-        // VirtualProtect returns 0 on failure.
-        alloc_failed = (VirtualProtect(rdram, mem_size, PAGE_READWRITE, &old_protect) == 0);
+        // VirtualAlloc returns nullptr on failure; committed pages are zero-initialized.
+        alloc_failed = (VirtualAlloc(rdram, mem_size, MEM_COMMIT, PAGE_READWRITE) == nullptr);
         if (alloc_failed) {
             VirtualFree(rdram, 0, MEM_RELEASE);
         }
