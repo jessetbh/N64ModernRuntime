@@ -69,6 +69,11 @@ namespace ultramodern {
         // raw-SI/PIF path) never reach __osMotorAccess, so the PIF emulation (librecomp si.cpp)
         // must forward motor commands itself.
         void set_rumble(int controller_num, bool on);
+
+        // [wcw fix] Run the get_connected_device_info callback directly (Device::None / Pak::None
+        // when unset). The raw-SI/PIF emulation (librecomp si.cpp) asks it which ports carry a
+        // Rumble Pak, so each game chooses per port (its main.cpp) without a runtime flag.
+        connected_device_info_t get_connected_device_info(int controller_num);
     }
 }
 
