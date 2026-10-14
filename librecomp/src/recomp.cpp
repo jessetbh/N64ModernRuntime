@@ -23,6 +23,7 @@
 #include "ultramodern/error_handling.hpp"
 #include "librecomp/addresses.hpp"
 #include "librecomp/mods.hpp"
+#include "librecomp/startup_shutdown.hpp"
 #include "recompiler/live_recompiler.h"
 
 #ifdef _WIN32
@@ -554,6 +555,9 @@ bool ultramodern::is_game_started() {
 }
 
 std::atomic_bool exited = false;
+// [wcw fix] Set by the game start thread once ultramodern::preinit has returned (the gfx
+// thread has finished creating the renderer). See recomp::pump_until_startup_done.
+static std::atomic_bool preinit_done = false;
 moodycamel::LightweightSemaphore graphics_shutdown_ready;
 
 void ultramodern::quit() {
@@ -883,6 +887,7 @@ void recomp::start(
         ultramodern::set_native_thread_name("Game Start Thread");
 
         ultramodern::preinit(rdram, window_handle);
+        preinit_done.store(true);
 
         recomp_context context{};
 
@@ -890,12 +895,22 @@ void recomp::start(
         while (!wait_for_game_started(rdram, &context)) {}
     }, window_handle, rdram};
 
-    while (!exited) {
-        ultramodern::sleep_milliseconds(1);
+    auto pump_gfx = [&gfx_callbacks, &gfx_data]() {
         if (gfx_callbacks.update_gfx != nullptr) {
             gfx_callbacks.update_gfx(gfx_data);
         }
+    };
+    auto sleep_1ms = []() { ultramodern::sleep_milliseconds(1); };
+
+    while (!exited) {
+        sleep_1ms();
+        pump_gfx();
     }
+
+    // [wcw fix] jessetbh/aki-roadmap#73: a quit during startup must keep the window's messages
+    // flowing until the renderer exists, or the gfx thread (stuck in a cross-thread window
+    // call) and this thread (joining the game thread) deadlock.
+    recomp::pump_until_startup_done(preinit_done, pump_gfx, sleep_1ms);
 
     graphics_shutdown_ready.signal();
 
