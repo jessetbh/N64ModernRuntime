@@ -131,6 +131,16 @@ static void wcw2k_pak_flush() {
 // and writes are honored regardless of identity, so saves can never be lost to rumble.
 static bool wcw_pak_is_rumble = false;
 
+// [wcw] Ports 2-4 (channels 1-3): a plain Rumble Pak (no save data) when the game's
+// get_connected_device_info reports Pak::RumblePak for that port, else no pak. The games'
+// controller managers probe osMotorInit on every port, but their Controller Pak saves only
+// use port 1, so a rumble-only pak there is what a real console with Rumble Paks in ports
+// 2-4 sees. Port 1 stays the hybrid above whatever the callback says.
+static bool wcw_port_has_rumble_pak(int channel) {
+    return channel != 0 &&
+           ultramodern::input::get_connected_device_info(channel).connected_pak == ultramodern::input::Pak::RumblePak;
+}
+
 // Bounded diagnostic log of bank/ID-region pak traffic (dedup'd), to observe the game's
 // accessory-detect and rumble-probe sequences.
 static void wcw_log_pak_bank_op(char op, uint16_t addr, uint8_t value) {
@@ -261,8 +271,9 @@ static void wcw_process_pif() {
             pif_ram[i + 1] |= 0x80;                      // CHNL_ERR_NORESP: no device
         }
         else if (cmd == 0x00 || cmd == 0xFF) {           // request status
-            // status byte 0x01 = Controller Pak present (port 1 only; see pak emulation above).
-            if (rx >= 3) { res[0] = 0x05; res[1] = 0x00; res[2] = (channel == 0) ? 0x01 : 0x00; }
+            // status byte 0x01 = pak present (port 1's hybrid pak, or a Rumble Pak in ports 2-4).
+            bool has_pak = (channel == 0) || wcw_port_has_rumble_pak(channel);
+            if (rx >= 3) { res[0] = 0x05; res[1] = 0x00; res[2] = has_pak ? 0x01 : 0x00; }
         }
         else if (cmd == 0x01) {                          // read button
             if (rx >= 4) {
@@ -341,6 +352,28 @@ static void wcw_process_pif() {
             res[0] = wcw_pak_data_crc(data);
             static bool logged = false;
             if (!logged) { logged = true; fprintf(stderr, "[wcw] first Controller Pak write (addr=0x%04X)\n", addr); }
+        }
+        else if (cmd == 0x02 && t >= 3 && rx >= 33 && wcw_port_has_rumble_pak(channel)) {   // ports 2-4 Rumble Pak read
+            // Like hardware (and mupen64plus): 0x80s in the 0x8000..0x8FFF window, which is what
+            // osMotorInit checks (old and new libultra), zeros everywhere else.
+            uint16_t addr = (uint16_t)((pif_ram[i + 3] << 8) | pif_ram[i + 4]);
+            uint32_t offset = addr & 0xFFE0u;
+            memset(res, (offset >= 0x8000 && offset < 0x9000) ? 0x80 : 0x00, 32);
+            res[32] = wcw_pak_data_crc(res);
+        }
+        else if (cmd == 0x03 && t >= 35 && rx >= 1 && wcw_port_has_rumble_pak(channel)) {  // ports 2-4 Rumble Pak write
+            uint16_t addr = (uint16_t)((pif_ram[i + 3] << 8) | pif_ram[i + 4]);
+            uint32_t offset = addr & 0xFFE0u;
+            const uint8_t* data = &pif_ram[i + 5];
+            if (offset >= 0xC000) {
+                // Motor command: 0x01s start the motor, 0x00s stop it. Other writes (the
+                // osMotorInit 0x80/0xFE bank writes) need no state: the reads above are fixed.
+                bool on = (data[0] & 1) != 0;
+                ultramodern::input::set_rumble(channel, on);
+                static bool logged_on[MAXCONTROLLERS] = {};
+                if (on && !logged_on[channel]) { logged_on[channel] = true; fprintf(stderr, "[wcw][pak] port %d first motor ON\n", channel + 1); }
+            }
+            res[0] = wcw_pak_data_crc(data);
         }
         else {
             // Unsupported joybus command: report no device so the game falls back gracefully.

@@ -121,6 +121,15 @@ void ultramodern::input::set_rumble(int controller_num, bool on) {
     }
 }
 
+// [wcw fix] Exposed so the raw-SI/PIF emulation (librecomp si.cpp) can tell which ports have a
+// Rumble Pak when it answers raw joybus status and pak commands.
+ultramodern::input::connected_device_info_t ultramodern::input::get_connected_device_info(int controller_num) {
+    if (input_callbacks.get_connected_device_info != nullptr) {
+        return input_callbacks.get_connected_device_info(controller_num);
+    }
+    return { Device::None, Pak::None };
+}
+
 extern "C" s32 osContStartReadData(RDRAM_ARG PTR(OSMesgQueue) mq) {
     ultramodern::input::poll_input();
 
