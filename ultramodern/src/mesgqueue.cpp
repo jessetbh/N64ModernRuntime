@@ -1,5 +1,6 @@
 #include <thread>
 #include <mutex>
+#include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <cstdio>
@@ -106,6 +107,9 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
 std::atomic_int wcw_requeues{0}, wcw_extmsg_delivered{0}, wcw_extmsg_dropped{0};
 // [wcw] DIAGNOSTIC: idle waits that found only the undeliverable requeue backlog and waited for a new message (aki-roadmap#90).
 std::atomic_int wcw_idle_backlog_waits{0};
+// [wcw] DIAGNOSTIC: backlog messages the idle wait holds outside the queue while it waits for a new one,
+// so the health line's ext= still counts them.
+std::atomic_int wcw_idle_backlog_held{0};
 
 // [wcw] DIAGNOSTIC: small histogram of the (mq, msg) pairs being requeued, to identify WHICH
 // message is undeliverable when the backlog grows. Lossy/racy by design (diagnostic only).
@@ -209,7 +213,7 @@ void wcw_health_tick() {
         }
     }
     fprintf(stderr, "[wcw][health] vis/s=%d ext=%zu rq/s=%d del/s=%d drop/s=%d idlebk/s=%d%s\n",
-        wcw_viswaps.exchange(0), external_messages.size_approx(),
+        wcw_viswaps.exchange(0), external_messages.size_approx() + (size_t)std::max(0, wcw_idle_backlog_held.load()),
         wcw_requeues.exchange(0), wcw_extmsg_delivered.exchange(0),
         wcw_extmsg_dropped.exchange(0), wcw_idle_backlog_waits.exchange(0), hist);
 }
@@ -236,6 +240,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
             const em::Delivery outcome = em::undeliverable(to_send.requeue_if_blocked, wcw_steady_ms(), to_send.enqueue_ms, requeue_grace_ms);
             if (outcome == em::Delivery::Retry) {
                 to_send.tries++;
+                wcw_idle_backlog_held.fetch_add(1);
                 wcw_note_requeue(to_send.mq, to_send.mesg);
             }
             else if (to_send.requeue_if_blocked) {
@@ -244,6 +249,7 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
             return outcome;
         },
         [] { ultramodern::park_game_thread_if_quitting(); }); // [wcw fix] see park_game_threads
+    wcw_idle_backlog_held.fetch_sub(result.requeued);
     wcw_requeues.fetch_add(result.requeued);
     wcw_idle_backlog_waits.fetch_add(result.backlog_waits);
 }
