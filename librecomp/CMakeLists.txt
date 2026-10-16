@@ -66,3 +66,25 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/../N64Recomp ${CMAKE_CURRENT_BINARY_DIR}/
 
 target_link_libraries(librecomp PRIVATE ultramodern N64Recomp LiveRecomp)
 target_link_libraries(librecomp PUBLIC miniz)
+
+# [wcw] Unit tests for librecomp's own decision logic (tests/wcw; first: quitting during startup,
+# jessetbh/aki-roadmap#73). They build and run as part of every librecomp build, so a failing test fails
+# the game's build. LIBRECOMP_WCW_TESTS=OFF skips them.
+option(LIBRECOMP_WCW_TESTS "Build and run the wcw unit tests with librecomp" ON)
+if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
+    add_executable(librecomp_wcw_tests
+        "${PROJECT_SOURCE_DIR}/tests/wcw/startup_shutdown_tests.cpp"
+    )
+    target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/tests/wcw")
+    set(LIBRECOMP_WCW_TESTS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/librecomp_wcw_tests.passed")
+    add_custom_command(
+        OUTPUT "${LIBRECOMP_WCW_TESTS_STAMP}"
+        COMMAND librecomp_wcw_tests
+        COMMAND ${CMAKE_COMMAND} -E touch "${LIBRECOMP_WCW_TESTS_STAMP}"
+        DEPENDS librecomp_wcw_tests
+        COMMENT "Running librecomp wcw unit tests"
+        VERBATIM
+    )
+    add_custom_target(librecomp_wcw_tests_run DEPENDS "${LIBRECOMP_WCW_TESTS_STAMP}")
+    add_dependencies(librecomp librecomp_wcw_tests_run)
+endif()
