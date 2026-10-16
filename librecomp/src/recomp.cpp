@@ -23,6 +23,7 @@
 #include "ultramodern/error_handling.hpp"
 #include "librecomp/addresses.hpp"
 #include "librecomp/mods.hpp"
+#include "librecomp/save_backups.hpp"
 #include "librecomp/startup_shutdown.hpp"
 #include "recompiler/live_recompiler.h"
 
@@ -56,6 +57,22 @@ std::filesystem::path config_path;
 std::unordered_map<std::u8string, recomp::GameEntry> game_roms {};
 // The global mod context.
 std::unique_ptr<recomp::mods::ModContext> mod_context = std::make_unique<recomp::mods::ModContext>();
+
+// [wcw saves] The save file the backup menu works on (save_backups.hpp): the running game's, or before a game has
+// started, the first registered game's stock save (the ports register one game).
+std::filesystem::path recomp::save_backups::main_save_file() {
+    std::filesystem::path running = ultramodern::get_save_file_path();
+    if (!running.empty()) {
+        return running;
+    }
+
+    std::lock_guard<std::mutex> lock(game_roms_mutex);
+    if (game_roms.empty() || config_path.empty()) {
+        return {};
+    }
+
+    return config_path / u8"saves" / (game_roms.begin()->first + u8".bin");
+}
 // The project's version.
 recomp::Version project_version;
 // The current game's save type.

@@ -22,6 +22,7 @@
 
 #include "helpers.hpp"
 #include "librecomp/files.hpp"
+#include "librecomp/save_backups.hpp"
 
 #define MAXCONTROLLERS 4
 
@@ -110,6 +111,10 @@ static void wcw2k_pak_flush() {
     }
     if (failed) {
         fprintf(stderr, "[wcw2k][pak] FAILED to write pak image %s\n", path.string().c_str());
+    }
+    else {
+        // [wcw saves] Timestamped backup on change, rate-limited (aki-roadmap#50).
+        recomp::save_backups::backup_save_file(path, recomp::save_backups::BackupReason::Change);
     }
 }
 
