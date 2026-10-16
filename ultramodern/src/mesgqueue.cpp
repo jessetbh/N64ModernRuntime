@@ -14,6 +14,7 @@
 
 #include "ultramodern/ultra64.h"
 #include "ultramodern/ultramodern.hpp"
+#include "ultramodern/external_message_pump.hpp"
 
 struct QueuedMessage {
     PTR(OSMesgQueue) mq;
@@ -41,6 +42,11 @@ static moodycamel::BlockingConcurrentQueue<QueuedMessage> external_messages {};
 // orders of magnitude longer than any transient queue-full window (a frame or two) yet still
 // emulates the hardware drop.
 constexpr int64_t requeue_grace_ms = 1000;
+
+// [wcw fix] Longest the idle wait holds the undeliverable backlog while waiting for a new message
+// (aki-roadmap#90). A new message ends the wait at once; this only bounds how long the caller goes
+// without re-checking its running queue and the backlog's grace window. One VI.
+constexpr std::chrono::microseconds idle_backlog_wait{16000};
 
 static int64_t wcw_steady_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -98,7 +104,7 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
 // requeue_if_blocked messages put back on external_messages), per-second delivery counts,
 // and messages dropped after exhausting the requeue grace window.
 std::atomic_int wcw_requeues{0}, wcw_extmsg_delivered{0}, wcw_extmsg_dropped{0};
-// [wcw] DIAGNOSTIC: idle waits that found nothing deliverable, only the requeue backlog (aki-roadmap#90).
+// [wcw] DIAGNOSTIC: idle waits that found only the undeliverable requeue backlog and waited for a new message (aki-roadmap#90).
 std::atomic_int wcw_idle_backlog_waits{0};
 
 // [wcw] DIAGNOSTIC: small histogram of the (mq, msg) pairs being requeued, to identify WHICH
@@ -209,45 +215,37 @@ void wcw_health_tick() {
 }
 
 void ultramodern::wait_for_external_message(RDRAM_ARG1) {
-    // [wcw fix] Drain every available message per wake instead of processing exactly one.
-    // The single-message version deadlocked: on delivery failure it re-enqueued immediately,
-    // and moodycamel's consumer bias then dequeued that same producer's item right back —
-    // an undeliverable requeue_if_blocked message (full 1-deep target queue) spun forever
-    // and starved every other producer's messages (VI retrace included), freezing the game.
-    QueuedMessage to_send;
+    // [wcw fix] Deliver everything available per wake (one message per wake let an undeliverable
+    // requeue_if_blocked message cycle straight back out of the queue and starve every other
+    // producer, VI retrace included). When only undeliverable messages are there, hold them aside
+    // and block on the queue for a new message: they can't become deliverable until a game thread
+    // runs, and that needs a new message. The previous version re-enqueued them and slept 1 ms, so
+    // with World Tour's / VPW64's standing backlog of orphaned DMA completions every retrace and
+    // task-done message that arrived during the sleep reached the game 1-2 ms late
+    // (aki-roadmap#90). The logic is in external_message_pump.hpp (unit-tested).
+    namespace em = ultramodern::external_message_pump;
     thread_local std::vector<QueuedMessage> requeued_messages;
-    requeued_messages.clear();
-    bool delivered_any = false;
-    external_messages.wait_dequeue(to_send);
-    ultramodern::park_game_thread_if_quitting(); // [wcw fix] see park_game_threads
-    int64_t now_ms = wcw_steady_ms();
-    do {
-        if (do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false)) {
-            delivered_any = true;
-            wcw2k_note_delivery(to_send.mq, to_send.mesg);
-            wcw_note_latency(to_send, 'i');
-        }
-        else if (to_send.requeue_if_blocked) {
+    const em::WaitResult result = em::wait_and_deliver(external_messages, requeued_messages, idle_backlog_wait,
+        [&](QueuedMessage& to_send) {
+            if (do_send(PASS_RDRAM to_send.mq, to_send.mesg, to_send.jam, false)) {
+                wcw2k_note_delivery(to_send.mq, to_send.mesg);
+                wcw_note_latency(to_send, 'i');
+                return em::Delivery::Delivered;
+            }
             // [wcw fix] Same grace-window drop as dequeue_external_messages above.
-            if (now_ms - to_send.enqueue_ms <= requeue_grace_ms) {
+            const em::Delivery outcome = em::undeliverable(to_send.requeue_if_blocked, wcw_steady_ms(), to_send.enqueue_ms, requeue_grace_ms);
+            if (outcome == em::Delivery::Retry) {
                 to_send.tries++;
-                requeued_messages.push_back(to_send);
                 wcw_note_requeue(to_send.mq, to_send.mesg);
             }
-            else {
+            else if (to_send.requeue_if_blocked) {
                 wcw_extmsg_dropped.fetch_add(1);
             }
-        }
-    } while (external_messages.try_dequeue(to_send));
-    wcw_requeues.fetch_add((int)requeued_messages.size());
-    for (QueuedMessage& cur_mesg : requeued_messages) {
-        external_messages.enqueue(cur_mesg);
-    }
-    // If nothing was deliverable, don't burn a core cycling the requeued messages.
-    if (!delivered_any && !requeued_messages.empty()) {
-        wcw_idle_backlog_waits.fetch_add(1);
-        ultramodern::sleep_milliseconds(1);
-    }
+            return outcome;
+        },
+        [] { ultramodern::park_game_thread_if_quitting(); }); // [wcw fix] see park_game_threads
+    wcw_requeues.fetch_add(result.requeued);
+    wcw_idle_backlog_waits.fetch_add(result.backlog_waits);
 }
 
 void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
