@@ -1,4 +1,5 @@
 #include "ultramodern/ultramodern.hpp"
+#include "ultramodern/perf.hpp"
 
 void ultramodern::schedule_running_thread(RDRAM_ARG PTR(OSThread) t_) {
     debug_printf("[Scheduling] Adding thread %d to the running queue\n", TO_PTR(OSThread, t_)->id);
@@ -50,7 +51,13 @@ void ultramodern::check_running_queue(RDRAM_ARG1) {
 extern "C" void pause_self(RDRAM_ARG1) {
     while (true) {
         // Wait until an external message arrives, then allow the next thread to run.
+        // [wcw perf] WCW_PERF_LOG: this wait is the idle thread's, i.e. time the game had nothing to run.
+        const bool perf_on = ultramodern::perf::enabled();
+        const int64_t perf_start = perf_on ? ultramodern::perf::now_ns() : 0;
         ultramodern::wait_for_external_message(PASS_RDRAM1);
+        if (perf_on) {
+            ultramodern::perf::add_game_idle(ultramodern::perf::now_ns() - perf_start);
+        }
         ultramodern::check_running_queue(PASS_RDRAM1);
     }
 }

@@ -14,6 +14,7 @@
 #include "ultramodern/ultra64.h"
 #include "ultramodern/ultramodern.hpp"
 #include "ultramodern/extensions.h"
+#include "ultramodern/perf.hpp"
 
 #include "ultramodern/rsp.hpp"
 #include "ultramodern/renderer_context.hpp"
@@ -407,9 +408,15 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
         }
         tasknum++;
 
+        const bool perf_on = ultramodern::perf::enabled();
+        const int64_t perf_start = perf_on ? ultramodern::perf::now_ns() : 0;
         if (!ultramodern::rsp::run_task(PASS_RDRAM task)) {
             fprintf(stderr, "Failed to execute task type: %" PRIu32 "\n", task->t.type);
             ULTRAMODERN_QUICK_EXIT();
+        }
+
+        if (perf_on) { // [wcw perf] WCW_PERF_LOG
+            ultramodern::perf::phase((task->t.type == M_AUDTASK) ? "rsp_audio" : "rsp_task", perf_start, ultramodern::perf::now_ns());
         }
 
         if (taskwatch) {
@@ -545,7 +552,12 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                 ultramodern::extensions::on_displaylist_submitted(displaylist);
 
                 [[maybe_unused]] auto renderer_start = std::chrono::high_resolution_clock::now();
+                const bool perf_on = ultramodern::perf::enabled();
+                const int64_t perf_start = perf_on ? ultramodern::perf::now_ns() : 0;
                 renderer_context->send_dl(&task_action->task);
+                if (perf_on) { // [wcw perf] WCW_PERF_LOG
+                    ultramodern::perf::phase("dl_submit", perf_start, ultramodern::perf::now_ns());
+                }
                 sp_complete(); // [wcw fix] see above: RSP inputs are consumed only now.
                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
                 { // [wcw] DIAGNOSTIC (WCW_PRESENT_LUM=1): per-task display-list processing cost on this thread.
@@ -663,6 +675,9 @@ std::atomic_int wcw_viswaps{0};
 extern "C" void osViSwapBuffer(RDRAM_ARG PTR(void) frameBufPtr) {
     std::lock_guard lock{ events_context.message_mutex };
     wcw_viswaps.fetch_add(1);
+    if (ultramodern::perf::enabled()) { // [wcw perf] WCW_PERF_LOG: game_frame / game_busy
+        ultramodern::perf::game_frame_boundary();
+    }
     // [wcw] DIAGNOSTIC: log swaps — if this never fires, VI scans out nothing (black screen)
     // regardless of what the RDP rendered.
     { static int n = 0; if (n++ < 30) fprintf(stderr, "[wcw][viswap#%d] fb=0x%08X\n", n, (unsigned)frameBufPtr); }
