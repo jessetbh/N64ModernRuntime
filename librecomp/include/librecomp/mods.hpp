@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <array>
+#include <span>
 #include <cstddef>
 #include <variant>
 #include <mutex>
@@ -639,6 +640,13 @@ namespace recomp {
         // empty when none is active. A hack can change the save layout, so its saves (and the
         // pak images next to them) are kept apart from the stock game's.
         std::u8string get_rom_patch_save_subfolder();
+        // [wcw romhack] Functions the port repaired offline: its post-recompile pipeline (fix_switches,
+        // fix_selfentry, ...) and hand-edits, i.e. the game's RecompiledFuncs/repaired_functions.txt. A ROM-patch
+        // mod that changes one has it recompiled from the patched ROM by the live recompiler, which has none of
+        // those repairs, so the result can miscompile or lose a hand-edit. Warn: log each one and load the mod.
+        // Refuse: don't load the mod (FailedToLoadPatch). Call before the mods are loaded; later calls replace the list.
+        enum class RepairedFunctionPolicy { Warn, Refuse };
+        void register_repaired_functions(std::span<recomp_func_t* const> funcs, RepairedFunctionPolicy policy);
         std::vector<ModDetails> get_all_mod_details(const std::string& mod_game_id);
         size_t game_mode_count(const std::string& mod_game_id, bool include_disabled);
         recomp::Version get_mod_version(size_t mod_index);

@@ -69,16 +69,17 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/../N64Recomp ${CMAKE_CURRENT_BINARY_DIR}/
 target_link_libraries(librecomp PRIVATE ultramodern N64Recomp LiveRecomp)
 target_link_libraries(librecomp PUBLIC miniz)
 
-# [wcw] Unit tests for librecomp's own decision logic (save backup rules: aki-roadmap#50). Plain C++ (no game, no ROM),
-# built and run as part of every librecomp build, so a failing test fails the game's build (as rt64's and recompui's
-# wcw tests do). LIBRECOMP_WCW_TESTS=OFF skips them.
+# [wcw] Unit tests for librecomp's own decision logic (tests/wcw: quitting during startup, jessetbh/aki-roadmap#73;
+# save backup rules, aki-roadmap#50). Plain C++ (no game, no ROM), built and run as part of every librecomp build, so a
+# failing test fails the game's build (as rt64's and recompui's wcw tests do). LIBRECOMP_WCW_TESTS=OFF skips them.
 option(LIBRECOMP_WCW_TESTS "Build and run the wcw unit tests with librecomp" ON)
 if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
     add_executable(librecomp_wcw_tests
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/save_backup_rules_tests.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/save_backup_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/startup_shutdown_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/save_backup_rules_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/save_backup_rules.cpp"
     )
-    target_include_directories(librecomp_wcw_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/tests/wcw")
     set(LIBRECOMP_WCW_TESTS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/librecomp_wcw_tests.passed")
     add_custom_command(
         OUTPUT "${LIBRECOMP_WCW_TESTS_STAMP}"

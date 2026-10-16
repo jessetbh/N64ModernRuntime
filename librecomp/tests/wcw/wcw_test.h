@@ -1,8 +1,8 @@
 //
-// librecomp
+// N64ModernRuntime (librecomp)
 //
 
-// [wcw] Minimal unit test harness for librecomp's wcw tests (a copy of rt64's tests/wcw/wcw_test.h): TEST_CASE registers a test, CHECK / CHECK_NEAR record failures
+// [wcw] Minimal unit test harness for the wcw tests: TEST_CASE registers a test, CHECK / CHECK_NEAR record failures
 // without stopping the test, and runAll() runs everything and returns the process exit code.
 
 #pragma once

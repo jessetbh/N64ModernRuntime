@@ -125,7 +125,3 @@ TEST_CASE("time: exact differences, including leap days") {
     CHECK_EQ(at(1970, 1, 1, 0, 0, 1).sort_key(), int64_t(1));
     CHECK(display_time(at(2026, 10, 14, 3, 15, 2)) == "2026-10-14 03:15:02");
 }
-
-int main() {
-    return WcwTest::runAll("librecomp wcw tests");
-}
