@@ -5,6 +5,7 @@
 
 #include "librecomp/files.hpp"
 #include "librecomp/mods.hpp"
+#include "librecomp/mod_folder_rules.hpp"
 #include "librecomp/overlays.hpp"
 #include "librecomp/game.hpp"
 #include "librecomp/patcher.hpp"
@@ -800,10 +801,28 @@ std::vector<recomp::mods::ModOpenErrorDetails> recomp::mods::ModContext::scan_mo
     close_mods();
 
     static const std::vector<ModContentTypeId> empty_content_types{};
+
+    // [wcw] Folders without a mod.json open like a manifest-less container (a texture pack folder with rt64.json opens
+    // like an .rtz), aki-roadmap#48.
+    std::vector<folder_rules::Container> folder_containers;
+    for (const auto& [extension, container] : container_types) {
+        folder_rules::Container rule;
+        rule.requires_manifest = container.requires_manifest;
+        for (ModContentTypeId type : container.supported_content_types) {
+            rule.content_types.emplace_back(type.value);
+        }
+        folder_containers.emplace_back(std::move(rule));
+    }
+    std::vector<std::string> content_filenames;
+    for (const ModContentType& type : content_types) {
+        content_filenames.emplace_back(type.content_filename);
+    }
+
     for (const auto& mod_path : std::filesystem::directory_iterator{mod_folder, std::filesystem::directory_options::skip_permission_denied, ec}) {
         bool is_mod = false;
         bool requires_manifest = true;
         std::reference_wrapper<const std::vector<ModContentTypeId>> supported_content_types = std::cref(empty_content_types);
+        std::vector<ModContentTypeId> folder_content_types;
         if (mod_path.is_regular_file()) {
             auto find_container_it = container_types.find(mod_path.path().extension().string());
             if (find_container_it != container_types.end()) {
@@ -814,6 +833,19 @@ std::vector<recomp::mods::ModOpenErrorDetails> recomp::mods::ModContext::scan_mo
         }
         else if (mod_path.is_directory()) {
             is_mod = true;
+            std::error_code exists_ec;
+            if (!std::filesystem::exists(mod_path.path() / "mod.json", exists_ec)) {
+                const std::filesystem::path folder = mod_path.path();
+                std::vector<size_t> types = folder_rules::manifestless_folder_types(folder_containers, content_filenames,
+                    [&folder](const std::string& name) { std::error_code file_ec; return std::filesystem::is_regular_file(folder / name, file_ec); });
+                if (!types.empty()) {
+                    for (size_t type : types) {
+                        folder_content_types.emplace_back(ModContentTypeId{ .value = type });
+                    }
+                    requires_manifest = false;
+                    supported_content_types = std::cref(folder_content_types);
+                }
+            }
         }
         if (is_mod) {
             printf("Opening mod " PATHFMT "\n", mod_path.path().stem().c_str());

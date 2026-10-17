@@ -32,6 +32,7 @@ add_library(librecomp STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/recomp.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/rsp.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/save_backup_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/mod_folder_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/save_backups.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/si.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/sp.cpp"
@@ -70,7 +71,7 @@ target_link_libraries(librecomp PRIVATE ultramodern N64Recomp LiveRecomp)
 target_link_libraries(librecomp PUBLIC miniz)
 
 # [wcw] Unit tests for librecomp's own decision logic (tests/wcw: quitting during startup, jessetbh/aki-roadmap#73;
-# save backup rules, aki-roadmap#50; ultramodern's idle external-message wait, aki-roadmap#90). Plain C++ (no game, no ROM), built and run as part of every librecomp build, so a
+# save backup rules, aki-roadmap#50; ultramodern's idle external-message wait, aki-roadmap#90; texture pack folders, aki-roadmap#48). Plain C++ (no game, no ROM), built and run as part of every librecomp build, so a
 # failing test fails the game's build (as rt64's and recompui's wcw tests do). LIBRECOMP_WCW_TESTS=OFF skips them.
 option(LIBRECOMP_WCW_TESTS "Build and run the wcw unit tests with librecomp" ON)
 if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
@@ -78,7 +79,9 @@ if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
         "${PROJECT_SOURCE_DIR}/tests/wcw/startup_shutdown_tests.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/save_backup_rules_tests.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/external_message_pump_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/mod_folder_rules_tests.cpp"
         "${PROJECT_SOURCE_DIR}/src/save_backup_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/src/mod_folder_rules.cpp"
     )
     target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/tests/wcw"
         "${PROJECT_SOURCE_DIR}/../ultramodern/include" "${PROJECT_SOURCE_DIR}/../thirdparty/concurrentqueue")
