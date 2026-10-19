@@ -80,10 +80,13 @@ namespace recomp::mods {
                 fprintf(stderr, "[conversion] texture folder %s is missing; running without it\n", c.textures_dir.c_str());
             }
             else {
-                if ((c.textures_naming == "rice") && !std::filesystem::exists(pack / "rt64.json", ec)) {
-                    // A pack as its author shipped it (Rice / GLideN64 names): rt64 matches the names at runtime.
+                const bool legacyNames = (c.textures_naming == "rice") || (c.textures_naming == "jabo");
+                if (legacyNames && !std::filesystem::exists(pack / "rt64.json", ec)) {
+                    // A pack as its author shipped it (Rice / GLideN64 or Jabo Direct3D8 names): rt64 matches the names
+                    // at runtime, so the database needs no entries.
                     std::ofstream out(pack / "rt64.json", std::ios::binary);
-                    out << R"({ "configuration": { "configurationVersion": 3, "hashVersion": 5, "autoPath": "rice", "defaultShift": "none" }, "textures": [] })";
+                    out << R"({ "configuration": { "configurationVersion": 3, "hashVersion": 5, "autoPath": ")" <<
+                        ((c.textures_naming == "rice") ? "rice" : "rt64") << R"(", "defaultShift": "none" }, "textures": [] })";
                 }
                 if (pack.parent_path() != folder) {
                     folders.emplace_back(pack.parent_path());
