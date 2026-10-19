@@ -159,12 +159,39 @@ void recomp::overlays::add_loaded_function(int32_t ram, recomp_func_t* func) {
     func_map[ram] = func;
 }
 
+// [wcw fullconv] Extra entry points tied to a code section, by its rom address: a de-relinked
+// hack's hooks return into the middle of an overlay's functions, so those addresses are
+// registered as functions whenever that overlay is loaded (another overlay sharing the slot
+// may have replaced them meanwhile).
+static std::unordered_map<uint32_t, std::vector<std::pair<int32_t, recomp_func_t*>>> section_extra_funcs{};
+
+void recomp::overlays::add_section_extra_function(uint32_t section_rom, int32_t ram, recomp_func_t* func) {
+    section_extra_funcs[section_rom].emplace_back(ram, func);
+    for (const LoadedSection& ls : loaded_sections) {
+        const SectionTableEntry& section = sections_info.code_sections[ls.section_table_index];
+        if (section.rom_addr == section_rom) {
+            func_map[ram + (ls.loaded_ram_addr - (int32_t)section.ram_addr)] = func;
+        }
+    }
+}
+
+void recomp::overlays::clear_section_extra_functions() {
+    section_extra_funcs.clear();
+}
+
 void load_overlay(size_t section_table_index, int32_t ram) {
     const SectionTableEntry& section = sections_info.code_sections[section_table_index];
 
     for (size_t function_index = 0; function_index < section.num_funcs; function_index++) {
         const FuncEntry& func = section.funcs[function_index];
         func_map[ram + func.offset] = func.func;
+    }
+
+    auto extra_it = section_extra_funcs.find(section.rom_addr);
+    if (extra_it != section_extra_funcs.end()) {
+        for (const auto& [extra_ram, extra_func] : extra_it->second) {
+            func_map[extra_ram + (ram - (int32_t)section.ram_addr)] = extra_func;
+        }
     }
 
     loaded_sections.emplace_back(ram, section_table_index);
