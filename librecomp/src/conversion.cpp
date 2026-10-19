@@ -8,6 +8,7 @@
 #include <sstream>
 
 #include "librecomp/conversion.hpp"
+#include "librecomp/conversion_codes.hpp"
 #include "librecomp/files.hpp"
 #include "ultramodern/error_handling.hpp"
 
@@ -136,5 +137,51 @@ namespace recomp::mods {
     void set_cheats_mod_id(const std::string &mod_id) {
         std::lock_guard lock(conversion_mutex);
         cheats_mod_id = mod_id;
+    }
+
+    namespace {
+        std::once_flag native_codes_once;
+        std::vector<conversion::codes::Code> native_codes;
+        bool native_codes_ready = false;
+    }
+
+    bool active_native_codes_ready() {
+        std::call_once(native_codes_once, []() {
+            std::string text = active_conversion_codes();
+            std::string port;
+            {
+                std::lock_guard lock(conversion_mutex);
+                port = port_rom_revision;
+            }
+
+            if (text.empty() || port.empty()) {
+                return;
+            }
+
+            std::string game_key;
+            int native_rev = 0;
+            conversion::codes::split_rom_tag(port, game_key, native_rev);
+            conversion::codes::Report r;
+            if (!conversion::codes::parse_file(text, game_key, native_rev, native_codes, r)) {
+                return; // another revision: the cheats mod translates those
+            }
+
+            native_codes_ready = true;
+            fprintf(stderr, "[conversion] codes: %d active (native table: %d writes, %d conditionals, %d repeaters, %zu KB of text)",
+                r.added, r.writes, r.conditionals, r.repeaters, text.size() / 1024);
+            if (r.enablers > 0) fprintf(stderr, ", %d enabler codes ignored (not needed)", r.enablers);
+            if (r.buttons > 0) fprintf(stderr, ", %d button codes (88/89) ignored", r.buttons);
+            if (r.unknown > 0) fprintf(stderr, ", %d unknown code types ignored", r.unknown);
+            if (r.malformed > 0) fprintf(stderr, ", %d malformed lines, first at line %d", r.malformed, r.first_bad_line);
+            fprintf(stderr, "\n");
+        });
+
+        return native_codes_ready;
+    }
+
+    void apply_active_native_codes(uint8_t *rdram, uint32_t rdram_size) {
+        if (active_native_codes_ready()) {
+            conversion::codes::apply(native_codes, rdram, rdram_size);
+        }
     }
 }

@@ -34,6 +34,7 @@ add_library(librecomp STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/save_backup_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/mod_folder_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion_codes.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/save_backups.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/si.cpp"
@@ -85,6 +86,7 @@ if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
         "${PROJECT_SOURCE_DIR}/tests/wcw/conversion_tests.cpp"
         "${PROJECT_SOURCE_DIR}/src/save_backup_rules.cpp"
         "${PROJECT_SOURCE_DIR}/src/mod_folder_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/src/conversion_codes.cpp"
         "${PROJECT_SOURCE_DIR}/src/conversion_rules.cpp"
     )
     target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/tests/wcw"

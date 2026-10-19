@@ -7,6 +7,7 @@
 // its mods on, every other mod off for the session, its saves in saves/<id>/. The parsing and the enable rule are pure
 // and unit tested (tests/wcw/conversion_tests.cpp).
 
+#include <cstdint>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -73,6 +74,13 @@ namespace recomp {
         void set_port_rom_revision(const std::string &tag);
         // The cheats engine's mod id (AkiMods cheats), enabled with a conversion that has codes; set by the game.
         void set_cheats_mod_id(const std::string &mod_id);
+        // The active conversion's codes as a native table (librecomp/conversion_codes.hpp), parsed on the first call:
+        // true when its codes file is written for this port's revision (or untagged). Those codes then run from
+        // apply_active_native_codes, every frame, with no size cap; the game hands the cheats mod no text for them.
+        // False: no codes, or codes for another revision, which stay with the cheats mod (it translates them).
+        bool active_native_codes_ready();
+        // Runs the native table once over RDRAM (rdram_size bytes from 0x80000000). No-op when there is none.
+        void apply_active_native_codes(uint8_t *rdram, uint32_t rdram_size);
     }
 
     // The save subfolder the game uses (conversion::resolve_save_subfolder): the active conversion's id, else the
