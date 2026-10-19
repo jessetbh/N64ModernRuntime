@@ -72,6 +72,24 @@ namespace recomp::mods {
                 fprintf(stderr, "[conversion] texture package %s isn't installed; running without it\n", c.textures_package.c_str());
             }
         }
+        if (!c.textures_dir.empty()) {
+            // An inline pack opens as a manifest-less mod folder (rt64.json at its root) from a scan of its parent.
+            const std::filesystem::path pack = folder / std::filesystem::u8path(c.textures_dir);
+            std::error_code ec;
+            if (!std::filesystem::is_directory(pack, ec)) {
+                fprintf(stderr, "[conversion] texture folder %s is missing; running without it\n", c.textures_dir.c_str());
+            }
+            else {
+                if ((c.textures_naming == "rice") && !std::filesystem::exists(pack / "rt64.json", ec)) {
+                    // A pack as its author shipped it (Rice / GLideN64 names): rt64 matches the names at runtime.
+                    std::ofstream out(pack / "rt64.json", std::ios::binary);
+                    out << R"({ "configuration": { "configurationVersion": 3, "hashVersion": 5, "autoPath": "rice", "defaultShift": "none" }, "textures": [] })";
+                }
+                if (pack.parent_path() != folder) {
+                    folders.emplace_back(pack.parent_path());
+                }
+            }
+        }
 
         fprintf(stderr, "[conversion] running %s (\"%s\"):%s%s%s%s%s; saves in saves/%s\n", c.id.c_str(), c.name.c_str(),
             c.has_patch ? " patch" : "", c.has_codes ? " codes" : "", c.has_saves ? " saves" : "", c.has_textures ? " textures" : "",

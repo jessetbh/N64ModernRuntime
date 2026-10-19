@@ -72,7 +72,12 @@ namespace recomp::mods::conversion {
 
         if (const json *textures = object("textures")) {
             c.textures_package = textures->value("package", std::string());
-            c.has_textures = textures->contains("file") || !c.textures_package.empty();
+            c.textures_dir = textures->value("dir", std::string());
+            while (!c.textures_dir.empty() && ((c.textures_dir.back() == '/') || (c.textures_dir.back() == '\\'))) {
+                c.textures_dir.pop_back();
+            }
+            c.textures_naming = textures->value("naming", std::string());
+            c.has_textures = textures->contains("file") || !c.textures_package.empty() || !c.textures_dir.empty();
         }
 
         if (const json *rt = object("rt")) {
@@ -82,7 +87,7 @@ namespace recomp::mods::conversion {
         }
 
         // Paths stay inside the conversion folder.
-        for (const std::string *path : { &c.codes_file, &c.rt_lights_file, &c.rt_materials_file }) {
+        for (const std::string *path : { &c.codes_file, &c.textures_dir, &c.rt_lights_file, &c.rt_materials_file }) {
             if ((path->find("..") != std::string::npos) || (!path->empty() && ((path->front() == '/') || (path->front() == '\\') ||
                 (path->find(':') != std::string::npos)))) {
                 error = "path leaves the conversion folder: " + *path;

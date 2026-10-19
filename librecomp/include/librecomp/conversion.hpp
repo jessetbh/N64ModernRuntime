@@ -36,6 +36,9 @@ namespace recomp {
                 std::string codes_rom;
                 // Texture dependency package ("Team-Name"), when the pack isn't inline.
                 std::string textures_package;
+                // Inline pack: a folder in the conversion ("textures"), and how its files are named ("rice" / "rt64").
+                std::string textures_dir;
+                std::string textures_naming;
                 std::string rt_lights_file;
                 std::string rt_materials_file;
             };

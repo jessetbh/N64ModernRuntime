@@ -49,6 +49,20 @@ TEST_CASE("conversion: a codes-only conversion is as valid as a patch one") {
     CHECK(!c.has_patch && c.has_codes);
 }
 
+TEST_CASE("conversion: an inline texture pack folder counts as textures, with its naming") {
+    Conversion c;
+    std::string error;
+    const std::string pack = R"json({ "format": "aki-conversion", "format_version": 1, "id": "hd_rice", "game": "wt",
+        "components": { "textures": { "dir": "textures/", "naming": "rice" } } })json";
+    CHECK(parse(pack, "hd_rice", c, error));
+    CHECK(c.has_textures);
+    CHECK(c.textures_dir == "textures");
+    CHECK(c.textures_naming == "rice");
+    CHECK(c.textures_package.empty());
+    // The pack folder stays inside the conversion too.
+    CHECK(!parse(R"json({ "format": "aki-conversion", "format_version": 1, "id": "a", "components": { "textures": { "dir": "../other" } } })json", "", c, error));
+}
+
 TEST_CASE("conversion: bad manifests are refused with a reason") {
     Conversion c;
     std::string error;
