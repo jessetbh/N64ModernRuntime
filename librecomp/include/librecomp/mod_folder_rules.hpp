@@ -25,6 +25,11 @@ namespace recomp {
             // look for), and each type appears once, in registration order.
             std::vector<size_t> manifestless_folder_types(const std::vector<Container> &containers,
                 const std::vector<std::string> &content_filenames, const std::function<bool(const std::string &)> &has_file);
+
+            // The mod id (and display name) of a mod without a mod.json, from its file or folder name: a folder keeps
+            // its whole name ("pack.v2"), a container file drops its extension ("pack.v2.rtz" is "pack.v2"). Folders
+            // used to lose everything after their last dot (aki-roadmap#100).
+            std::string manifestless_mod_id(const std::string &file_name, bool is_directory);
         }
     }
 }
