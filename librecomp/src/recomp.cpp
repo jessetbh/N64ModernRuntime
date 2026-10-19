@@ -23,6 +23,7 @@
 #include "ultramodern/error_handling.hpp"
 #include "librecomp/addresses.hpp"
 #include "librecomp/mods.hpp"
+#include "librecomp/conversion.hpp"
 #include "librecomp/save_backups.hpp"
 #include "librecomp/startup_shutdown.hpp"
 #include "recompiler/live_recompiler.h"
@@ -71,7 +72,21 @@ std::filesystem::path recomp::save_backups::main_save_file() {
         return {};
     }
 
-    return config_path / u8"saves" / (game_roms.begin()->first + u8".bin");
+    // [wcw fullconv] In the save subfolder (a conversion's or a ROM-patch mod's), like the running game's.
+    const std::u8string subfolder = recomp::get_save_subfolder();
+    const std::filesystem::path folder = subfolder.empty() ? (config_path / u8"saves") : (config_path / u8"saves" / subfolder);
+    return folder / (game_roms.begin()->first + u8".bin");
+}
+
+std::u8string recomp::get_save_subfolder() {
+    std::string out;
+    const std::u8string patch = recomp::mods::get_rom_patch_save_subfolder();
+    if (!recomp::mods::conversion::resolve_save_subfolder(std::getenv(recomp::mods::conversion::EnvVar),
+        std::string{ reinterpret_cast<const char*>(patch.data()), patch.size() }, out)) {
+        return u8"_invalid_conversion";
+    }
+
+    return std::u8string{ reinterpret_cast<const char8_t*>(out.data()), out.size() };
 }
 // The project's version.
 recomp::Version project_version;
@@ -125,17 +140,41 @@ void recomp::mods::register_deprecated_mod(const std::string& mod_id, recomp::mo
     mod_context->register_deprecated_mod(mod_id, deprecation_status, maximum_version);
 }
 
+namespace recomp::mods {
+    std::vector<std::filesystem::path> load_active_conversion(const std::filesystem::path &config_path);
+    bool active_conversion_codes_runnable();
+    std::string active_conversion_cheats_mod();
+}
+
 void recomp::mods::scan_mods() {
     std::vector<recomp::mods::ModOpenErrorDetails> mod_open_errors;
+    // [wcw fullconv] AKI_CONVERSION=<id>: also open the conversion's own mods (its patch, its texture pack).
+    const std::vector<std::filesystem::path> conversion_folders = load_active_conversion(config_path);
+    std::vector<std::string> conversion_mod_ids;
     {
         std::lock_guard mod_lock{ mod_context_mutex };
         mod_open_errors = mod_context->scan_mod_folder(config_path / mods_directory);
+        const size_t stock_mod_count = mod_context->num_opened_mods();
+        for (const std::filesystem::path &folder : conversion_folders) {
+            for (auto &error : mod_context->scan_mod_folder(folder, false)) {
+                mod_open_errors.emplace_back(std::move(error));
+            }
+        }
+        conversion_mod_ids = mod_context->opened_mod_ids_from(stock_mod_count);
     }
     for (const auto& cur_error : mod_open_errors) {
         printf("Error opening mod " PATHFMT ": %s (%s)\n", cur_error.mod_path.c_str(), recomp::mods::error_to_string(cur_error.error).c_str(), cur_error.error_param.c_str());
     }
 
     mod_context->load_mods_config();
+    if (!conversion_folders.empty()) {
+        // Exactly the conversion's mods (and the cheats engine for its codes) run; nothing is saved to mods.json.
+        mod_context->apply_session_enabled_mods(conversion::session_enabled_mods(conversion_mod_ids,
+            active_conversion_codes_runnable(), active_conversion_cheats_mod()));
+        for (const std::string &id : conversion_mod_ids) {
+            fprintf(stderr, "[conversion] mod %s enabled for this session\n", id.c_str());
+        }
+    }
 }
 
 void recomp::mods::close_mods() {

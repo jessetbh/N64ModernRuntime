@@ -1,0 +1,122 @@
+// [wcw fullconv] The active conversion (AKI_CONVERSION): read once at the first mod scan. See conversion.hpp.
+
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <mutex>
+#include <optional>
+#include <sstream>
+
+#include "librecomp/conversion.hpp"
+#include "librecomp/files.hpp"
+#include "ultramodern/error_handling.hpp"
+
+namespace {
+    std::mutex conversion_mutex;
+    std::optional<recomp::mods::conversion::Conversion> active;
+    std::filesystem::path active_folder;
+    std::string port_rom_revision;
+    std::string cheats_mod_id = "aki_cheats";
+
+    std::string read_text(const std::filesystem::path &path) {
+        std::ifstream file(path, std::ios::binary);
+        std::stringstream ss;
+        ss << file.rdbuf();
+        return ss.str();
+    }
+}
+
+namespace {
+    // A conversion that can't run must not start the game: its saves folder or mods would silently become the
+    // player's normal ones.
+    [[noreturn]] void refuse(const std::string &message) {
+        fprintf(stderr, "[conversion] %s\n", message.c_str());
+        ultramodern::error_handling::message_box((message + "\n\nThe game will close; your normal saves were not touched.").c_str());
+        ULTRAMODERN_QUICK_EXIT();
+    }
+}
+
+namespace recomp::mods {
+    // Called by scan_mods: loads <config>/conversions/<AKI_CONVERSION>/aki.json and returns the folders whose mods the
+    // session runs (the conversion's own, plus its texture dependency package when installed). Empty: no conversion.
+    std::vector<std::filesystem::path> load_active_conversion(const std::filesystem::path &config_path) {
+        std::lock_guard lock(conversion_mutex);
+        active.reset();
+        active_folder.clear();
+        const char *id = std::getenv(conversion::EnvVar);
+        if ((id == nullptr) || (id[0] == '\0')) {
+            return {};
+        }
+
+        if (!conversion::valid_id(id)) {
+            refuse(std::string(conversion::EnvVar) + "=" + id + " is not a valid conversion id.");
+        }
+
+        const std::filesystem::path folder = config_path / conversion::Folder / id;
+        const std::string text = read_text(folder / conversion::ManifestFile);
+        conversion::Conversion c;
+        std::string error;
+        if (text.empty() || !conversion::parse(text, id, c, error)) {
+            refuse("Can't start conversion \"" + std::string(id) + "\": " + (text.empty() ? std::string("it isn't installed (no ") +
+                (folder / conversion::ManifestFile).string() + ")" : error) + ".");
+        }
+
+        std::vector<std::filesystem::path> folders{ folder };
+        if (!c.textures_package.empty()) {
+            const std::filesystem::path package = config_path / conversion::Folder / conversion::PackagesFolder / c.textures_package;
+            std::error_code ec;
+            if (std::filesystem::is_directory(package, ec)) {
+                folders.emplace_back(package);
+            }
+            else {
+                fprintf(stderr, "[conversion] texture package %s isn't installed; running without it\n", c.textures_package.c_str());
+            }
+        }
+
+        fprintf(stderr, "[conversion] running %s (\"%s\"):%s%s%s%s%s; saves in saves/%s\n", c.id.c_str(), c.name.c_str(),
+            c.has_patch ? " patch" : "", c.has_codes ? " codes" : "", c.has_saves ? " saves" : "", c.has_textures ? " textures" : "",
+            c.has_rt ? " rt" : "", c.id.c_str());
+        if (c.has_codes && !conversion::codes_runnable(c.codes_rom, port_rom_revision)) {
+            fprintf(stderr, "[conversion] its codes are for \"%s\", this game is \"%s\": codes are off (they'd write the wrong addresses)\n",
+                c.codes_rom.c_str(), port_rom_revision.c_str());
+        }
+
+        active = std::move(c);
+        active_folder = folder;
+        return folders;
+    }
+
+    const conversion::Conversion *active_conversion() {
+        std::lock_guard lock(conversion_mutex);
+        return active ? &*active : nullptr;
+    }
+
+    std::string active_conversion_codes() {
+        std::lock_guard lock(conversion_mutex);
+        if (!active || !active->has_codes || !conversion::codes_runnable(active->codes_rom, port_rom_revision)) {
+            return {};
+        }
+
+        return read_text(active_folder / active->codes_file);
+    }
+
+    bool active_conversion_codes_runnable() {
+        std::lock_guard lock(conversion_mutex);
+        return active && active->has_codes && conversion::codes_runnable(active->codes_rom, port_rom_revision);
+    }
+
+    std::string active_conversion_cheats_mod() {
+        std::lock_guard lock(conversion_mutex);
+        return cheats_mod_id;
+    }
+
+    void set_port_rom_revision(const std::string &tag) {
+        std::lock_guard lock(conversion_mutex);
+        port_rom_revision = tag;
+    }
+
+    void set_cheats_mod_id(const std::string &mod_id) {
+        std::lock_guard lock(conversion_mutex);
+        cheats_mod_id = mod_id;
+    }
+}

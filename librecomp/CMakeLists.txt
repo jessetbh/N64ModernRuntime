@@ -33,6 +33,8 @@ add_library(librecomp STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/rsp.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/save_backup_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/mod_folder_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/save_backups.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/si.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/sp.cpp"
@@ -80,11 +82,13 @@ if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
         "${PROJECT_SOURCE_DIR}/tests/wcw/save_backup_rules_tests.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/external_message_pump_tests.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/mod_folder_rules_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/conversion_tests.cpp"
         "${PROJECT_SOURCE_DIR}/src/save_backup_rules.cpp"
         "${PROJECT_SOURCE_DIR}/src/mod_folder_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/src/conversion_rules.cpp"
     )
     target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/tests/wcw"
-        "${PROJECT_SOURCE_DIR}/../ultramodern/include" "${PROJECT_SOURCE_DIR}/../thirdparty/concurrentqueue")
+        "${PROJECT_SOURCE_DIR}/../ultramodern/include" "${PROJECT_SOURCE_DIR}/../thirdparty/concurrentqueue" "${PROJECT_SOURCE_DIR}/../thirdparty")
     set(LIBRECOMP_WCW_TESTS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/librecomp_wcw_tests.passed")
     add_custom_command(
         OUTPUT "${LIBRECOMP_WCW_TESTS_STAMP}"

@@ -6,6 +6,7 @@
 #include "librecomp/files.hpp"
 #include "librecomp/mods.hpp"
 #include "librecomp/mod_folder_rules.hpp"
+#include "librecomp/conversion.hpp"
 #include "librecomp/overlays.hpp"
 #include "librecomp/game.hpp"
 #include "librecomp/patcher.hpp"
@@ -789,16 +790,22 @@ void recomp::mods::ModContext::dirty_mod_configuration_thread_process() {
                 }
             }
 
-            save_mods_config(mods_config_path, latest_game_mode, config_enabled_mods, config_mod_order);
+            // [wcw fullconv] A conversion's session keeps the player's mods.json as it was.
+            if (!session_only_config) {
+                save_mods_config(mods_config_path, latest_game_mode, config_enabled_mods, config_mod_order);
+            }
             pending_config_save = false;
         }
     }
 }
 
-std::vector<recomp::mods::ModOpenErrorDetails> recomp::mods::ModContext::scan_mod_folder(const std::filesystem::path& mod_folder) {
+std::vector<recomp::mods::ModOpenErrorDetails> recomp::mods::ModContext::scan_mod_folder(const std::filesystem::path& mod_folder, bool close_first) {
     std::vector<recomp::mods::ModOpenErrorDetails> ret{};
     std::error_code ec;
-    close_mods();
+    if (close_first) {
+        close_mods();
+        session_only_config = false;
+    }
 
     static const std::vector<ModContentTypeId> empty_content_types{};
 
@@ -1219,6 +1226,24 @@ recomp::Version recomp::mods::ModContext::get_mod_deprecation_version(const std:
     }
     else {
         return Version();
+    }
+}
+
+std::vector<std::string> recomp::mods::ModContext::opened_mod_ids_from(size_t first) {
+    std::unique_lock lock(opened_mods_mutex);
+    std::vector<std::string> ids;
+    for (size_t i = first; i < opened_mods.size(); i++) {
+        ids.emplace_back(opened_mods[i].manifest.mod_id);
+    }
+
+    return ids;
+}
+
+void recomp::mods::ModContext::apply_session_enabled_mods(const std::unordered_set<std::string>& session_mods) {
+    session_only_config = true;
+    std::vector<std::string> ids = opened_mod_ids_from(0);
+    for (const std::string &id : ids) {
+        enable_mod(id, session_mods.contains(id), false);
     }
 }
 
