@@ -2197,7 +2197,15 @@ std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle> apply_regenlist(Regenera
     }
 
     // Patch the functions that were regenerated.
+    // [wcw fullconv] WCW_RELINK_LOG=1 prints each one's native address (with the static function it replaces,
+    // which symbolizes to its vram), to map a crash address in live-recompiled code back to a function.
+    static const bool relink_log = getenv("WCW_RELINK_LOG") != nullptr;
     for (size_t patched_func_index = 0; patched_func_index < regenlist.func_ptrs.size(); patched_func_index++) {
+        if (relink_log) {
+            fprintf(stderr, "[relink fn] patched %p replaces %p\n",
+                (void*)std::get<recomp_func_t*>(regenerated_code_handle->get_function_handle(patched_func_index)),
+                (void*)regenlist.func_ptrs[patched_func_index]);
+        }
         patch_func(regenlist.func_ptrs[patched_func_index], regenerated_code_handle->get_function_handle(patched_func_index));
     }
 
@@ -2462,6 +2470,9 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_re
     auto register_batch = [&](LiveRecompilerCodeHandle& handle, const std::vector<Extra>& batch) {
         for (size_t i = 0; i < batch.size(); i++) {
             recomp_func_t* func = std::get<recomp_func_t*>(handle.get_function_handle(i));
+            if (getenv("WCW_RELINK_LOG") != nullptr) {
+                fprintf(stderr, "[relink fn] extra %p vram 0x%08X entry 0x%08X\n", (void*)func, (uint32_t)batch[i].vram, (uint32_t)batch[i].entry);
+            }
             if (batch[i].tied) {
                 recomp::overlays::add_section_extra_function(batch[i].section_rom, (int32_t)batch[i].entry, func);
                 num_tied++;
