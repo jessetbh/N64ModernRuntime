@@ -76,11 +76,6 @@ namespace recomp::mods {
         fprintf(stderr, "[conversion] running %s (\"%s\"):%s%s%s%s%s; saves in saves/%s\n", c.id.c_str(), c.name.c_str(),
             c.has_patch ? " patch" : "", c.has_codes ? " codes" : "", c.has_saves ? " saves" : "", c.has_textures ? " textures" : "",
             c.has_rt ? " rt" : "", c.id.c_str());
-        if (c.has_codes && !conversion::codes_runnable(c.codes_rom, port_rom_revision)) {
-            fprintf(stderr, "[conversion] its codes are for \"%s\", this game is \"%s\": codes are off (they'd write the wrong addresses)\n",
-                c.codes_rom.c_str(), port_rom_revision.c_str());
-        }
-
         active = std::move(c);
         active_folder = folder;
         return folders;
@@ -93,7 +88,9 @@ namespace recomp::mods {
 
     std::string active_conversion_codes() {
         std::lock_guard lock(conversion_mutex);
-        if (!active || !active->has_codes || !conversion::codes_runnable(active->codes_rom, port_rom_revision)) {
+        // The codes file's own "# rom:" tag is the authority: the cheats engine refuses another game's codes and
+        // translates another revision's (AkiMods aki_cheats). The manifest's tag only feeds the launcher's notes.
+        if (!active || !active->has_codes) {
             return {};
         }
 
@@ -102,7 +99,7 @@ namespace recomp::mods {
 
     bool active_conversion_codes_runnable() {
         std::lock_guard lock(conversion_mutex);
-        return active && active->has_codes && conversion::codes_runnable(active->codes_rom, port_rom_revision);
+        return active && active->has_codes;
     }
 
     std::string active_conversion_cheats_mod() {

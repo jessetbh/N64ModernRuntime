@@ -57,7 +57,8 @@ namespace recomp {
             // then (falling back to the normal saves would let a conversion overwrite the player's progress).
             bool resolve_save_subfolder(const char *env_value, const std::string &patch_mod_id, std::string &out);
 
-            // Whether codes written for codes_rom run on the port's ROM revision as they are ("" = unknown: refused).
+            // Whether codes written for codes_rom may run on this port: the same game (the cheats engine translates another
+            // revision's addresses itself); "" (unknown) and other games are refused.
             bool codes_runnable(const std::string &codes_rom, const std::string &port_rom);
         }
 

@@ -62,7 +62,7 @@ namespace recomp::mods::conversion {
 
         if (const json *codes = object("codes")) {
             c.codes_file = codes->value("file", std::string());
-            c.codes_rom = codes->value("rom", std::string());
+            c.codes_rom = codes->value("rom", codes->value("rom_revision", std::string()));
             c.has_codes = !c.codes_file.empty();
         }
 
@@ -126,8 +126,10 @@ namespace recomp::mods::conversion {
     }
 
     bool codes_runnable(const std::string &codes_rom, const std::string &port_rom) {
-        // Codes for another revision write the wrong addresses (No Mercy Rev 0 codes corrupt Rev 1). A game with one
-        // revision tags it with its game key, which also matches.
-        return !codes_rom.empty() && (codes_rom == port_rom);
+        // Codes for the same game run: the cheats engine (AkiMods aki_cheats) reads the file's "# rom:" tag and
+        // translates another revision's addresses as it applies them (No Mercy Rev 0 -> Rev 1), dropping codes it
+        // can't map. Untagged codes and other games' codes stay off (Rev 0 codes written as they are corrupt Rev 1).
+        auto game = [](const std::string &tag) { return tag.substr(0, tag.find("-rev")); };
+        return !codes_rom.empty() && !port_rom.empty() && (game(codes_rom) == game(port_rom));
     }
 }

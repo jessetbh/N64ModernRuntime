@@ -94,9 +94,10 @@ TEST_CASE("conversion: a conversion's saves folder wins over the patch mod's; an
     CHECK(!resolve_save_subfolder("TNA", "", out));
 }
 
-TEST_CASE("conversion: codes only run on the revision they were written for (Rev 0 codes corrupt Rev 1)") {
+TEST_CASE("conversion: codes run for the same game (the engine translates revisions); untagged or other games stay off") {
     CHECK(codes_runnable("nomercy-rev1", "nomercy-rev1"));
-    CHECK(!codes_runnable("nomercy-rev0", "nomercy-rev1"));
+    CHECK(codes_runnable("nomercy-rev0", "nomercy-rev1"));
     CHECK(!codes_runnable("", "nomercy-rev1"));
+    CHECK(!codes_runnable("vpw2", "nomercy-rev1"));
     CHECK(codes_runnable("vpw2", "vpw2"));
 }
