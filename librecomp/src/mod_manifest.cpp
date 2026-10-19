@@ -5,6 +5,7 @@
 #include "recompiler/context.h"
 #include "librecomp/files.hpp"
 #include "librecomp/mods.hpp"
+#include "librecomp/mod_folder_rules.hpp"
 
 recomp::mods::ZipModFileHandle::~ZipModFileHandle() {
     if (file_handle) {
@@ -873,7 +874,10 @@ recomp::mods::ModOpenError recomp::mods::ModContext::open_mod_from_manifest(ModM
                     manifest.mod_game_ids.emplace_back(key);
                 }
 
-                manifest.mod_id = manifest.mod_root_path.stem().string();
+                // [wcw] A folder keeps the dots in its name (aki-roadmap#100).
+                std::error_code directory_ec;
+                const bool is_directory = std::filesystem::is_directory(manifest.mod_root_path, directory_ec);
+                manifest.mod_id = folder_rules::manifestless_mod_id(manifest.mod_root_path.filename().string(), is_directory);
                 manifest.display_name = manifest.mod_id;
                 manifest.description.clear();
                 manifest.short_description.clear();

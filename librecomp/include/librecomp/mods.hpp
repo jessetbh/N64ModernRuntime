@@ -29,6 +29,7 @@
 #include "librecomp/sections.h"
 #include "librecomp/overlays.hpp"
 #include "librecomp/config.hpp"
+#include "librecomp/mod_enable_rules.hpp"
 
 namespace N64Recomp {
     class Context;
@@ -389,6 +390,8 @@ namespace recomp {
             ModOpenError open_mod_from_memory(std::span<const uint8_t> mod_bytes, std::string &error_param, const std::vector<ModContentTypeId> &supported_content_types, bool requires_manifest);
             ModLoadError load_mod(ModHandle& mod, std::string& error_param);
             void check_dependencies(ModHandle& mod, std::vector<std::pair<ModLoadError, std::string>>& errors);
+            // [wcw] Callers hold opened_mods_mutex (aki-roadmap#100).
+            std::vector<enable_rules::Dependency> auto_enable_dependencies(const std::string& mod_id);
             CodeModLoadError init_mod_code(uint8_t* rdram, const std::unordered_map<uint32_t, uint16_t>& section_vrom_map, ModHandle& mod, int32_t load_address, bool hooks_available, uint32_t& ram_used, std::string& error_param);
             CodeModLoadError load_mod_code(uint8_t* rdram, ModHandle& mod, uint32_t base_event_index, std::string& error_param);
             CodeModLoadError resolve_code_dependencies(ModHandle& mod, size_t mod_index, const std::unordered_map<recomp_func_t*, recomp::overlays::BasePatchedFunction>& base_patched_funcs, std::string& error_param);

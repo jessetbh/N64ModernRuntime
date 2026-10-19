@@ -1,6 +1,7 @@
 #include "librecomp/mod_folder_rules.hpp"
 
 #include <algorithm>
+#include <filesystem>
 
 std::vector<size_t> recomp::mods::folder_rules::manifestless_folder_types(const std::vector<Container> &containers,
     const std::vector<std::string> &content_filenames, const std::function<bool(const std::string &)> &has_file) {
@@ -25,4 +26,12 @@ std::vector<size_t> recomp::mods::folder_rules::manifestless_folder_types(const 
     }
 
     return types;
+}
+
+std::string recomp::mods::folder_rules::manifestless_mod_id(const std::string &file_name, bool is_directory) {
+    if (is_directory) {
+        return file_name;
+    }
+
+    return std::filesystem::path(file_name).stem().string();
 }

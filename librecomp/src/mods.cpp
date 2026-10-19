@@ -6,6 +6,7 @@
 #include "librecomp/files.hpp"
 #include "librecomp/mods.hpp"
 #include "librecomp/mod_folder_rules.hpp"
+#include "librecomp/mod_enable_rules.hpp"
 #include "librecomp/overlays.hpp"
 #include "librecomp/game.hpp"
 #include "librecomp/patcher.hpp"
@@ -1053,6 +1054,19 @@ bool recomp::mods::ModContext::is_content_runtime_toggleable(ModContentTypeId co
     return content_types[content_type.value].allow_runtime_toggle;
 }
 
+// [wcw] A mod's dependencies for the auto-enable walk (enable_rules): empty for a mod that isn't opened.
+std::vector<recomp::mods::enable_rules::Dependency> recomp::mods::ModContext::auto_enable_dependencies(const std::string& mod_id) {
+    std::vector<enable_rules::Dependency> dependencies;
+    auto mod_it = opened_mods_by_id.find(mod_id);
+    if (mod_it != opened_mods_by_id.end()) {
+        for (const Dependency &dependency : opened_mods[mod_it->second].manifest.dependencies) {
+            dependencies.push_back({ dependency.mod_id, dependency.optional || is_mod_deprecated(dependency.mod_id, dependency.version) });
+        }
+    }
+
+    return dependencies;
+}
+
 void recomp::mods::ModContext::enable_mod(const std::string& mod_id, bool enabled, bool trigger_save) {
     // Check that the mod exists.
     std::unique_lock lock(opened_mods_mutex);
@@ -1093,28 +1107,22 @@ void recomp::mods::ModContext::enable_mod(const std::string& mod_id, bool enable
         }
 
         if (was_enabled) {
-            std::vector<std::string> mod_stack;
-            mod_stack.emplace_back(mod_id);
-            while (!mod_stack.empty()) {
-                std::string mod_from_stack = std::move(mod_stack.back());
-                mod_stack.pop_back();
+            // [wcw] on_enabled fires for each auto-enabled dependency with its own handle and content types; it fired
+            // with the dependent mod's (aki-roadmap#100).
+            const std::vector<std::string> newly_enabled = enable_rules::newly_auto_enabled(mod_id,
+                [this](const std::string &id) { return auto_enable_dependencies(id); }, auto_enabled_mods);
+            if (mods_loaded) {
+                for (const std::string &dependency_id : newly_enabled) {
+                    auto dependency_it = opened_mods_by_id.find(dependency_id);
+                    if (dependency_it == opened_mods_by_id.end()) {
+                        continue;
+                    }
 
-                auto mod_from_stack_it = opened_mods_by_id.find(mod_from_stack);
-                if (mod_from_stack_it != opened_mods_by_id.end()) {
-                    const ModHandle &mod_from_stack_handle = opened_mods[mod_from_stack_it->second];
-                    for (const Dependency &dependency : mod_from_stack_handle.manifest.dependencies) {
-                        if (!dependency.optional && !auto_enabled_mods.contains(dependency.mod_id) && !is_mod_deprecated(dependency.mod_id, dependency.version)) {
-                            auto_enabled_mods.emplace(dependency.mod_id);
-                            mod_stack.emplace_back(dependency.mod_id);
-
-                            if (mods_loaded) {
-                                for (ModContentTypeId type_id : mod_from_stack_handle.content_types) {
-                                    content_enabled_callback* callback = content_types[type_id.value].on_enabled;
-                                    if (callback) {
-                                        callback(*this, mod_from_stack_handle);
-                                    }
-                                }
-                            }
+                    const ModHandle &dependency_handle = opened_mods[dependency_it->second];
+                    for (ModContentTypeId type_id : dependency_handle.content_types) {
+                        content_enabled_callback* callback = content_types[type_id.value].on_enabled;
+                        if (callback) {
+                            callback(*this, dependency_handle);
                         }
                     }
                 }
@@ -1138,23 +1146,8 @@ void recomp::mods::ModContext::enable_mod(const std::string& mod_id, bool enable
             // The algorithm needs to be run again with a new set of auto-enabled mods from scratch for all enabled mods.
             std::unordered_set<std::string> new_auto_enabled_mods;
             for (const std::string &enabled_mod_id : enabled_mods) {
-                std::vector<std::string> mod_stack;
-                mod_stack.emplace_back(enabled_mod_id);
-                while (!mod_stack.empty()) {
-                    std::string mod_from_stack = std::move(mod_stack.back());
-                    mod_stack.pop_back();
-
-                    auto mod_from_stack_it = opened_mods_by_id.find(mod_from_stack);
-                    if (mod_from_stack_it != opened_mods_by_id.end()) {
-                        const ModHandle &mod_from_stack_handle = opened_mods[mod_from_stack_it->second];
-                        for (const Dependency &dependency : mod_from_stack_handle.manifest.dependencies) {
-                            if (!dependency.optional && !new_auto_enabled_mods.contains(dependency.mod_id) && !is_mod_deprecated(dependency.mod_id, dependency.version)) {
-                                new_auto_enabled_mods.emplace(dependency.mod_id);
-                                mod_stack.emplace_back(dependency.mod_id);
-                            }
-                        }
-                    }
-                }
+                enable_rules::newly_auto_enabled(enabled_mod_id,
+                    [this](const std::string &id) { return auto_enable_dependencies(id); }, new_auto_enabled_mods);
             }
 
             if (mods_loaded) {
