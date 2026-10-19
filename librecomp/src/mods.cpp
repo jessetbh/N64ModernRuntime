@@ -19,6 +19,9 @@
 // [wcw fullconv] Code ranges a de-relinked hack added (relink.json "code_ranges"), for jump tables
 // whose cases the hack redirected there.
 static std::vector<std::pair<uint32_t, uint32_t>> relink_code_ranges{};
+// [wcw fullconv] Where data the hack moved lives in the ROM (relink.json "data_ranges": the
+// Expansion-RAM payload), for jump tables the hack put there.
+static std::vector<std::array<uint32_t, 3>> relink_data_ranges{};
 
 static bool read_json(std::ifstream input_file, nlohmann::json &json_out) {
     if (!input_file.good()) {
@@ -1774,12 +1777,18 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_mo
         bool relink_exists = false;
         std::vector<char> relink_data = mod.manifest.file_handle->read_file("relink.json", relink_exists);
         relink_code_ranges.clear();
+        relink_data_ranges.clear();
         if (relink_exists) {
             nlohmann::json relink_json = nlohmann::json::parse(relink_data.begin(), relink_data.end(), nullptr, false);
             if (relink_json.is_object()) {
                 for (const nlohmann::json& r : relink_json.value("code_ranges", nlohmann::json::array())) {
                     if (r.is_array() && r.size() == 2) {
                         relink_code_ranges.emplace_back(r[0].get<uint32_t>(), r[1].get<uint32_t>());
+                    }
+                }
+                for (const nlohmann::json& r : relink_json.value("data_ranges", nlohmann::json::array())) {
+                    if (r.is_array() && r.size() == 3) {
+                        relink_data_ranges.push_back({ r[0].get<uint32_t>(), r[1].get<uint32_t>(), r[2].get<uint32_t>() });
                     }
                 }
             }
@@ -2147,9 +2156,13 @@ std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle> apply_regenlist(Regenera
     N64Recomp::Context hook_context = context_from_regenerated_list(regenlist, rom);
     hook_context.set_all_reference_sections_relocatable();
     hook_context.use_lookup_for_all_function_calls = true;
+    // [wcw fullconv] With a de-relinked hack active, code mods' hooks regenerate functions the
+    // hack changed too, so they need the same allowances.
+    tail_call_unknown = tail_call_unknown || !relink_code_ranges.empty();
     hook_context.tail_call_unknown_jumps_by_lookup = tail_call_unknown;
     if (tail_call_unknown) {
         hook_context.external_code_ranges = relink_code_ranges;
+        hook_context.jump_table_data_ranges = relink_data_ranges;
     }
 
     // Regenerate the functions using the live recompiler.
@@ -2399,9 +2412,11 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_re
     recomp::overlays::clear_section_extra_functions();
     relink_code_handles.clear();
     size_t num_tied = 0;
-    for (const auto& [data, extras] : groups) {
+    size_t num_failed = 0;
+    // Compiles a batch of extra functions with one live-recompiler context; null on failure.
+    auto compile_batch = [&](const std::array<uint32_t, 3>& data, const std::vector<Extra>& batch) -> std::unique_ptr<LiveRecompilerCodeHandle> {
         RegeneratedList regenlist{};
-        for (const Extra& e : extras) {
+        for (const Extra& e : batch) {
             regenlist.sections.emplace_back(RegeneratedSection{
                 .rom_addr = e.rom,
                 .ram_addr = e.vram,
@@ -2413,7 +2428,6 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_re
             regenlist.functions.emplace_back(RegeneratedFunction{ .section_offset = 0, .size = e.size });
             regenlist.func_ptrs.push_back(nullptr);
         }
-
         N64Recomp::Context context = context_from_regenerated_list(regenlist, patched_rom);
         context.set_all_reference_sections_relocatable();
         context.use_lookup_for_all_function_calls = true;
@@ -2422,6 +2436,7 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_re
         if (data[1] > data[0]) {
             context.jump_table_data_ranges.push_back(data);
         }
+        context.jump_table_data_ranges.insert(context.jump_table_data_ranges.end(), relink_data_ranges.begin(), relink_data_ranges.end());
         ModCodeHandleInputs handle_inputs{
             .base_event_index = 0,
             .recomp_trigger_event = recomp_trigger_event,
@@ -2436,28 +2451,50 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_re
         auto handle = std::make_unique<LiveRecompilerCodeHandle>(context, handle_inputs,
             std::unordered_map<size_t, size_t>{}, std::unordered_map<size_t, size_t>{}, std::move(original_section_indices), true);
         if (!handle->good()) {
-            relink_code_handles.clear();
-            return fail("could not recompile its extra code");
+            return {};
         }
         std::string reference_syms_error_param{};
         if (handle->populate_reference_symbols(context, reference_syms_error_param) != CodeModLoadError::Good) {
-            relink_code_handles.clear();
-            return fail("reference symbols: " + reference_syms_error_param);
+            return {};
         }
-        for (size_t i = 0; i < extras.size(); i++) {
-            recomp_func_t* func = std::get<recomp_func_t*>(handle->get_function_handle(i));
-            if (extras[i].tied) {
-                recomp::overlays::add_section_extra_function(extras[i].section_rom, (int32_t)extras[i].entry, func);
+        return handle;
+    };
+    auto register_batch = [&](LiveRecompilerCodeHandle& handle, const std::vector<Extra>& batch) {
+        for (size_t i = 0; i < batch.size(); i++) {
+            recomp_func_t* func = std::get<recomp_func_t*>(handle.get_function_handle(i));
+            if (batch[i].tied) {
+                recomp::overlays::add_section_extra_function(batch[i].section_rom, (int32_t)batch[i].entry, func);
                 num_tied++;
             }
             else {
-                recomp::overlays::add_loaded_function((int32_t)extras[i].entry, func);
+                recomp::overlays::add_loaded_function((int32_t)batch[i].entry, func);
             }
         }
-        relink_code_handles.emplace_back(std::move(handle));
+    };
+    for (const auto& [data, extras] : groups) {
+        auto handle = compile_batch(data, extras);
+        if (handle) {
+            register_batch(*handle, extras);
+            relink_code_handles.emplace_back(std::move(handle));
+            continue;
+        }
+        // One function broke the batch: compile them one by one, keep the good ones, name the bad.
+        for (const Extra& e : extras) {
+            std::vector<Extra> one{ e };
+            auto single = compile_batch(data, one);
+            if (single) {
+                register_batch(*single, one);
+                relink_code_handles.emplace_back(std::move(single));
+            }
+            else {
+                fprintf(stderr, "[relink] %s: could not recompile 0x%08X (entry 0x%08X, %u bytes); left out\n",
+                    mod_id.c_str(), e.vram, e.entry, e.size);
+                num_failed++;
+            }
+        }
     }
-    fprintf(stderr, "[relink] %s: %zu extra function(s) recompiled in %zu group(s) (%zu tied to an overlay)\n",
-        mod_id.c_str(), num_extras, groups.size(), num_tied);
+    fprintf(stderr, "[relink] %s: %zu extra function(s) recompiled in %zu group(s) (%zu tied to an overlay, %zu failed)\n",
+        mod_id.c_str(), num_extras - num_failed, groups.size(), num_tied, num_failed);
     return {};
 }
 
