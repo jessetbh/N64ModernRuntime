@@ -738,6 +738,31 @@ extern "C" void wcw_commit_low_user_segment(uint8_t* rdram) {
 #endif
 }
 
+// [wcw fullconv] A de-relinked hack that reads the cartridge directly (lw from 0xB0000000 + offset; relink.json
+// direct_rom_reads): the patched ROM is mapped read-only at that address of the reservation, in RDRAM's word order
+// (Revenge Starrcade 2.0 copies a block from ROM 0x2300000 at run time).
+extern "C" void wcw_map_rom_k1(uint8_t* rdram) {
+    std::span<const uint8_t> rom = recomp::get_rom();
+    const size_t size = (rom.size() + 0xFFFF) & ~size_t(0xFFFF);
+    if (size == 0 || size > 0x10000000) {
+        return;
+    }
+    uint8_t* dst = rdram + 0x30000000ull;
+#ifdef _WIN32
+    if (VirtualAlloc(dst, size, MEM_COMMIT, PAGE_READWRITE) == nullptr) {
+        fprintf(stderr, "[relink] could not map the ROM for direct reads\n");
+        return;
+    }
+#else
+    mprotect(dst, size, PROT_READ | PROT_WRITE);
+#endif
+    for (size_t i = 0; i + 4 <= rom.size(); i += 4) {
+        const uint32_t w = (uint32_t(rom[i]) << 24) | (uint32_t(rom[i + 1]) << 16) | (uint32_t(rom[i + 2]) << 8) | rom[i + 3];
+        memcpy(dst + i, &w, 4);
+    }
+    fprintf(stderr, "[relink] ROM mapped for direct reads (0x%zX bytes)\n", rom.size());
+}
+
 bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
     game_status.wait(GameStatus::None);
 

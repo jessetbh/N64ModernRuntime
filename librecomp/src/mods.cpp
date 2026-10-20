@@ -2214,6 +2214,7 @@ std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle> apply_regenlist(Regenera
 // jr/j), keeps the handle and registers the function.
 static uint8_t* relink_rdram = nullptr;
 extern "C" void wcw_commit_low_user_segment(uint8_t* rdram);   // recomp.cpp
+extern "C" void wcw_map_rom_k1(uint8_t* rdram);                // recomp.cpp
 static std::vector<std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle>> ram_code_handles{};
 static std::mutex ram_code_mutex{};
 struct RamCode { recomp_func_t* func; uint32_t size; uint64_t hash; };
@@ -2516,6 +2517,9 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_re
     json j = json::parse(relink_json.begin(), relink_json.end(), nullptr, false);
     if (j.is_discarded() || !j.is_object() || j.value("format", 0) != 1) {
         return fail("unreadable or unsupported format");
+    }
+    if (j.value("direct_rom_reads", false)) {
+        wcw_map_rom_k1(rdram);
     }
 
     recomp::do_rom_read(rdram, entrypoint_address, 0x10001000, 0x100000);
