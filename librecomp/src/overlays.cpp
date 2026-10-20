@@ -1,3 +1,4 @@
+#include <mutex>
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -514,8 +515,26 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t 
     return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
 }
 
+static recomp_func_t* (*missing_function_handler)(int32_t) = nullptr;
+static std::mutex missing_function_mutex{};
+
+void recomp::overlays::set_missing_function_handler(recomp_func_t* (*handler)(int32_t ram_addr)) {
+    missing_function_handler = handler;
+}
+
 extern "C" recomp_func_t * get_function(int32_t addr) {
     auto func_find = func_map.find(addr);
+    if (func_find == func_map.end() && missing_function_handler != nullptr) {
+        // [wcw fullconv] code a de-relinked hack loaded into RAM at run time: compile it once, keep it registered
+        std::lock_guard lock{ missing_function_mutex };
+        func_find = func_map.find(addr);
+        if (func_find == func_map.end()) {
+            if (recomp_func_t* func = missing_function_handler(addr)) {
+                func_map[addr] = func;
+                return func;
+            }
+        }
+    }
     if (func_find == func_map.end()) {
         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
         assert(false);
