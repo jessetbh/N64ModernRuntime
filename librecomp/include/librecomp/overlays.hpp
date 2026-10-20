@@ -47,6 +47,12 @@ namespace recomp {
         size_t num_base_events();
 
         void add_loaded_function(int32_t ram_addr, recomp_func_t* func);
+        // [wcw fullconv] Called when a lookup finds no function (a de-relinked hack's code loaded into RAM at run
+        // time); returns the compiled function or nullptr.
+        void set_missing_function_handler(recomp_func_t* (*handler)(int32_t ram_addr));
+        // [wcw fullconv] An extra entry point registered whenever the section at section_rom loads.
+        void add_section_extra_function(uint32_t section_rom, int32_t ram_addr, recomp_func_t* func);
+        void clear_section_extra_functions();
 
         struct BasePatchedFunction {
             size_t patch_section;

@@ -1,3 +1,4 @@
+#include <mutex>
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -159,12 +160,39 @@ void recomp::overlays::add_loaded_function(int32_t ram, recomp_func_t* func) {
     func_map[ram] = func;
 }
 
+// [wcw fullconv] Extra entry points tied to a code section, by its rom address: a de-relinked
+// hack's hooks return into the middle of an overlay's functions, so those addresses are
+// registered as functions whenever that overlay is loaded (another overlay sharing the slot
+// may have replaced them meanwhile).
+static std::unordered_map<uint32_t, std::vector<std::pair<int32_t, recomp_func_t*>>> section_extra_funcs{};
+
+void recomp::overlays::add_section_extra_function(uint32_t section_rom, int32_t ram, recomp_func_t* func) {
+    section_extra_funcs[section_rom].emplace_back(ram, func);
+    for (const LoadedSection& ls : loaded_sections) {
+        const SectionTableEntry& section = sections_info.code_sections[ls.section_table_index];
+        if (section.rom_addr == section_rom) {
+            func_map[ram + (ls.loaded_ram_addr - (int32_t)section.ram_addr)] = func;
+        }
+    }
+}
+
+void recomp::overlays::clear_section_extra_functions() {
+    section_extra_funcs.clear();
+}
+
 void load_overlay(size_t section_table_index, int32_t ram) {
     const SectionTableEntry& section = sections_info.code_sections[section_table_index];
 
     for (size_t function_index = 0; function_index < section.num_funcs; function_index++) {
         const FuncEntry& func = section.funcs[function_index];
         func_map[ram + func.offset] = func.func;
+    }
+
+    auto extra_it = section_extra_funcs.find(section.rom_addr);
+    if (extra_it != section_extra_funcs.end()) {
+        for (const auto& [extra_ram, extra_func] : extra_it->second) {
+            func_map[extra_ram + (ram - (int32_t)section.ram_addr)] = extra_func;
+        }
     }
 
     loaded_sections.emplace_back(ram, section_table_index);
@@ -487,10 +515,48 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t 
     return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
 }
 
+static recomp_func_t* (*missing_function_handler)(int32_t) = nullptr;
+static std::mutex missing_function_mutex{};
+
+void recomp::overlays::set_missing_function_handler(recomp_func_t* (*handler)(int32_t ram_addr)) {
+    missing_function_handler = handler;
+}
+
+// [wcw fullconv] the thread's last lookups, printed when one fails (who jumped to a bad address)
+static thread_local uint32_t lookup_history[16]{};
+static thread_local uint32_t lookup_history_pos = 0;
+
+// [wcw fullconv] diagnostics (a crash handler): print this thread's last lookups
+extern "C" void wcw_print_lookup_history() {
+    fprintf(stderr, "  this thread's last lookups (oldest first):");
+    for (uint32_t i = 0; i < 16; i++) {
+        fprintf(stderr, " %08X", lookup_history[(lookup_history_pos + i) & 15]);
+    }
+    fprintf(stderr, "\n");
+}
+
 extern "C" recomp_func_t * get_function(int32_t addr) {
+    lookup_history[lookup_history_pos++ & 15] = (uint32_t)addr;
     auto func_find = func_map.find(addr);
+    if (func_find == func_map.end() && missing_function_handler != nullptr) {
+        // [wcw fullconv] code a de-relinked hack loaded into RAM at run time: compile it once, keep it registered
+        std::lock_guard lock{ missing_function_mutex };
+        func_find = func_map.find(addr);
+        if (func_find == func_map.end()) {
+            // not kept in func_map: RAM code can change under the same address (overlays swap, buffers get reloaded),
+            // so the handler checks its own cache each time
+            if (recomp_func_t* func = missing_function_handler(addr)) {
+                return func;
+            }
+        }
+    }
     if (func_find == func_map.end()) {
         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
+        fprintf(stderr, "  this thread's previous lookups (oldest first):");
+        for (uint32_t i = 1; i < 16; i++) {
+            fprintf(stderr, " %08X", lookup_history[(lookup_history_pos - 1 + i) & 15]);
+        }
+        fprintf(stderr, "\n");
         assert(false);
         std::exit(EXIT_FAILURE);
     }
