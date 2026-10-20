@@ -2235,6 +2235,15 @@ static recomp_func_t* compile_ram_function(int32_t addr) {
             seen.insert(pc);
             const uint32_t w = word(pc);
             const uint32_t op = w >> 26, rt = (w >> 16) & 31;
+            // a word no game code contains ends the code (don't trace on into data)
+            const uint32_t funct = w & 0x3F;
+            const bool invalid = op == 0x12 || op == 0x13 || (op >= 0x1C && op <= 0x1F) || op == 0x3B ||
+                (op == 0 && (funct == 0x01 || funct == 0x05 || funct == 0x0E || funct == 0x15 || funct == 0x28 ||
+                             funct == 0x29 || funct == 0x35 || funct == 0x37 || funct == 0x39 || funct == 0x3D ||
+                             ((funct <= 0x03 || (funct >= 0x38 && funct != 0x39 && funct != 0x3D)) && ((w >> 21) & 31) != 0)));
+            if (invalid) {
+                break;
+            }
             end = std::max(end, pc + 8);
             const bool branch = (op >= 4 && op <= 7) || (op >= 0x14 && op <= 0x17) ||
                 (op == 1 && (rt <= 3 || (rt >= 0x10 && rt <= 0x13)));
