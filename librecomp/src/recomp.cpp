@@ -724,6 +724,20 @@ void recomp::mods::set_mod_index(const std::string &mod_game_id, const std::stri
     return mod_context->set_mod_index(mod_game_id, mod_id, index);
 }
 
+// [wcw fullconv] With a de-relinked hack active, the low user segment (0x00000000-0x007FFFFF, rdram + 0x80000000 in
+// the reservation) reads as zero pages instead of faulting: hack code tested on lenient emulators reads through
+// pointers that aren't set up yet on the port's first frames (Revenge Starrcade 2.0's per-frame hook walks an audio
+// table before the main thread relocates its offsets). Stock games keep faulting there.
+extern "C" void wcw_commit_low_user_segment(uint8_t* rdram) {
+#ifdef _WIN32
+    if (VirtualAlloc(rdram + 0x80000000ull, 0x800000, MEM_COMMIT, PAGE_READWRITE) == nullptr) {
+        fprintf(stderr, "[relink] could not map the low user segment\n");
+    }
+#else
+    mprotect(rdram + 0x80000000ull, 0x800000, PROT_READ | PROT_WRITE);
+#endif
+}
+
 bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
     game_status.wait(GameStatus::None);
 

@@ -2213,6 +2213,7 @@ std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle> apply_regenlist(Regenera
 // live-recompiles the code found in RDRAM instead (its extent traced from the entry, following branches up to a
 // jr/j), keeps the handle and registers the function.
 static uint8_t* relink_rdram = nullptr;
+extern "C" void wcw_commit_low_user_segment(uint8_t* rdram);   // recomp.cpp
 static std::vector<std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle>> ram_code_handles{};
 static std::mutex ram_code_mutex{};
 struct RamCode { recomp_func_t* func; uint32_t size; uint64_t hash; };
@@ -2510,6 +2511,7 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_re
     // code the hack loads into RAM at run time: compiled from RDRAM when first looked up (compile_ram_function)
     relink_rdram = rdram;
     recomp::overlays::set_missing_function_handler(compile_ram_function);
+    wcw_commit_low_user_segment(rdram);
 
     json j = json::parse(relink_json.begin(), relink_json.end(), nullptr, false);
     if (j.is_discarded() || !j.is_object() || j.value("format", 0) != 1) {
