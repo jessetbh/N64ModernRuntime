@@ -1,4 +1,6 @@
 #include <span>
+#include <mutex>
+#include <unordered_set>
 #include <map>
 #include <array>
 #include <fstream>
@@ -2206,6 +2208,91 @@ std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle> apply_regenlist(Regenera
     return regenerated_code_handle;
 }
 
+// [wcw fullconv] Code a hack loads into RAM at run time (VPW64 Deluxe calls 0x80364B30, code that arrives with a data
+// file): nothing registered it, so a lookup there would end the game. With a de-relinked hack active, such a lookup
+// live-recompiles the code found in RDRAM instead (its extent traced from the entry, following branches up to a
+// jr/j), keeps the handle and registers the function.
+static uint8_t* relink_rdram = nullptr;
+static std::vector<std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle>> ram_code_handles{};
+static std::mutex ram_code_mutex{};
+
+static recomp_func_t* compile_ram_function(int32_t addr) {
+    using namespace recomp::mods;
+    const uint32_t a = (uint32_t)addr;
+    if (relink_rdram == nullptr || a < 0x80000400 || a >= 0x80800000 || (a & 3) != 0) {
+        return nullptr;
+    }
+    std::lock_guard lock{ ram_code_mutex };
+    auto word = [](uint32_t v) { return *reinterpret_cast<const uint32_t*>(relink_rdram + (v - 0x80000000)); };
+    const uint32_t limit = std::min<uint32_t>(a + 0x8000, 0x80800000);
+    std::unordered_set<uint32_t> seen{};
+    std::vector<uint32_t> work{ a };
+    uint32_t end = a;
+    while (!work.empty()) {
+        uint32_t pc = work.back();
+        work.pop_back();
+        while (pc >= a && pc < limit && !seen.contains(pc)) {
+            seen.insert(pc);
+            const uint32_t w = word(pc);
+            const uint32_t op = w >> 26, rt = (w >> 16) & 31;
+            end = std::max(end, pc + 8);
+            const bool branch = (op >= 4 && op <= 7) || (op >= 0x14 && op <= 0x17) ||
+                (op == 1 && (rt <= 3 || (rt >= 0x10 && rt <= 0x13)));
+            if (branch) {
+                const uint32_t t = pc + 4 + (uint32_t)((int32_t)(int16_t)(w & 0xFFFF) << 2);
+                if (t >= a && t < limit && !seen.contains(t)) {
+                    work.push_back(t);
+                }
+                if (op == 4 && ((w >> 16) & 0x3FF) == 0) {
+                    break;                                          // b: unconditional
+                }
+            }
+            if (op == 2 || (op == 0 && (w & 0x3F) == 0x08)) {
+                break;                                              // j / jr (the slot is in: pc + 8)
+            }
+            pc += 4;
+        }
+    }
+    const uint32_t size = std::min(end, limit) - a;
+    // The code as a big-endian "ROM" of its own (section at rom 0, ram a).
+    auto bytes = std::make_shared<std::vector<uint8_t>>(size);
+    for (uint32_t i = 0; i < size; i += 4) {
+        const uint32_t w = word(a + i);
+        (*bytes)[i] = uint8_t(w >> 24); (*bytes)[i + 1] = uint8_t(w >> 16); (*bytes)[i + 2] = uint8_t(w >> 8); (*bytes)[i + 3] = uint8_t(w);
+    }
+    RegeneratedList regenlist{};
+    regenlist.sections.emplace_back(RegeneratedSection{ .rom_addr = 0, .ram_addr = a, .original_index = 0,
+        .first_func_index = 0, .first_reloc_index = 0, .relocatable = false });
+    regenlist.functions.emplace_back(RegeneratedFunction{ .section_offset = 0, .size = size });
+    regenlist.func_ptrs.push_back(nullptr);
+    N64Recomp::Context context = context_from_regenerated_list(regenlist, std::span<const uint8_t>{ *bytes });
+    context.set_all_reference_sections_relocatable();
+    context.use_lookup_for_all_function_calls = true;
+    context.tail_call_unknown_jumps_by_lookup = true;
+    context.external_code_ranges = relink_code_ranges;
+    ModCodeHandleInputs handle_inputs{
+        .base_event_index = 0,
+        .recomp_trigger_event = recomp_trigger_event,
+        .get_function = get_function,
+        .cop0_status_write = cop0_status_write,
+        .cop0_status_read = cop0_status_read,
+        .switch_error = switch_error,
+        .do_break = do_break,
+        .reference_section_addresses = section_addresses,
+    };
+    auto handle = std::make_unique<LiveRecompilerCodeHandle>(context, handle_inputs,
+        std::unordered_map<size_t, size_t>{}, std::unordered_map<size_t, size_t>{}, std::vector<size_t>(1, 0), true);
+    std::string err{};
+    if (!handle->good() || handle->populate_reference_symbols(context, err) != CodeModLoadError::Good) {
+        fprintf(stderr, "[relink] RAM code at 0x%08X (%u bytes) could not be recompiled\n", a, size);
+        return nullptr;
+    }
+    recomp_func_t* func = std::get<recomp_func_t*>(handle->get_function_handle(0));
+    fprintf(stderr, "[relink] recompiled RAM code at 0x%08X (%u bytes, loaded at run time)\n", a, size);
+    ram_code_handles.emplace_back(std::move(handle));
+    return func;
+}
+
 // [wcw romhack] The game's offline-repaired functions (register_repaired_functions).
 static std::unordered_set<recomp_func_t*> repaired_functions{};
 static recomp::mods::RepairedFunctionPolicy repaired_function_policy = recomp::mods::RepairedFunctionPolicy::Warn;
@@ -2362,6 +2449,10 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_re
         fprintf(stderr, "[relink] %s: %s\n", mod_id.c_str(), why.c_str());
         return std::vector<ModLoadErrorDetails>{ ModLoadErrorDetails{ mod_id, ModLoadError::FailedToLoadPatch, "relink.json: " + why } };
     };
+
+    // code the hack loads into RAM at run time: compiled from RDRAM when first looked up (compile_ram_function)
+    relink_rdram = rdram;
+    recomp::overlays::set_missing_function_handler(compile_ram_function);
 
     json j = json::parse(relink_json.begin(), relink_json.end(), nullptr, false);
     if (j.is_discarded() || !j.is_object() || j.value("format", 0) != 1) {
