@@ -1,6 +1,7 @@
 #ifndef __RECOMP_MODS_HPP__
 #define __RECOMP_MODS_HPP__
 
+#include <atomic>
 #include <filesystem>
 #include <string>
 #include <fstream>
@@ -343,7 +344,13 @@ namespace recomp {
             void register_game(const std::string& mod_game_id);
             void register_embedded_mod(const std::string& mod_id, std::span<const uint8_t> mod_bytes);
             void register_deprecated_mod(const std::string& mod_id, DeprecationStatus deprecation_status, const Version& maximum_version);
-            std::vector<ModOpenErrorDetails> scan_mod_folder(const std::filesystem::path& mod_folder);
+            // [wcw fullconv] close_first = false adds a folder's mods to the ones already open (a conversion's folder).
+            std::vector<ModOpenErrorDetails> scan_mod_folder(const std::filesystem::path& mod_folder, bool close_first = true);
+            // [wcw fullconv] Ids of the opened mods from index first on (the ones a later scan added).
+            std::vector<std::string> opened_mod_ids_from(size_t first);
+            // [wcw fullconv] Enables exactly these mods for this session and stops writing mods.json until the next scan,
+            // so a conversion's session never changes the player's normal mod setup.
+            void apply_session_enabled_mods(const std::unordered_set<std::string>& session_mods);
             void close_mods();
             void load_mods_config();
             void enable_mod(const std::string& mod_id, bool enabled, bool trigger_save);
@@ -426,6 +433,8 @@ namespace recomp {
             std::unordered_set<std::string> mod_ids;
             std::unordered_set<std::string> enabled_mods;
             std::unordered_set<std::string> auto_enabled_mods;
+            // [wcw fullconv] A conversion session: mods.json isn't written.
+            std::atomic<bool> session_only_config = false;
             std::unordered_map<std::string, DeprecatedMod> deprecated_mods;
             std::unordered_map<recomp_func_t*, PatchData> patched_funcs;
             std::unordered_map<std::string, size_t> loaded_mods_by_id;
