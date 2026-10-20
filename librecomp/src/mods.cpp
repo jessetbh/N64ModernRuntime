@@ -526,7 +526,17 @@ recomp::mods::LiveRecompilerCodeHandle::LiveRecompilerCodeHandle(
     for (size_t func_index = 0; func_index < context.functions.size(); func_index++) {
         std::ostringstream dummy_ostream{};
 
+        // [wcw fullconv] Name the function a failure comes from (the generator's own errors don't).
+        const N64Recomp::Function& func = context.functions[func_index];
         if (!N64Recomp::recompile_function_live(generator, context, func_index, dummy_ostream, dummy_static_funcs, true)) {
+            fprintf(stderr, "[live recompiler] could not recompile %s (vram 0x%08X, rom 0x%08X, %zu bytes)\n",
+                func.name.c_str(), func.vram, func.rom, func.words.size() * 4);
+            errored = true;
+            break;
+        }
+        if (generator.has_errored()) {
+            fprintf(stderr, "[live recompiler] an instruction of %s (vram 0x%08X, rom 0x%08X, %zu bytes) couldn't be emitted\n",
+                func.name.c_str(), func.vram, func.rom, func.words.size() * 4);
             errored = true;
             break;
         }
