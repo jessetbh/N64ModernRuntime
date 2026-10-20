@@ -522,21 +522,41 @@ void recomp::overlays::set_missing_function_handler(recomp_func_t* (*handler)(in
     missing_function_handler = handler;
 }
 
+// [wcw fullconv] the thread's last lookups, printed when one fails (who jumped to a bad address)
+static thread_local uint32_t lookup_history[16]{};
+static thread_local uint32_t lookup_history_pos = 0;
+
+// [wcw fullconv] diagnostics (a crash handler): print this thread's last lookups
+extern "C" void wcw_print_lookup_history() {
+    fprintf(stderr, "  this thread's last lookups (oldest first):");
+    for (uint32_t i = 0; i < 16; i++) {
+        fprintf(stderr, " %08X", lookup_history[(lookup_history_pos + i) & 15]);
+    }
+    fprintf(stderr, "\n");
+}
+
 extern "C" recomp_func_t * get_function(int32_t addr) {
+    lookup_history[lookup_history_pos++ & 15] = (uint32_t)addr;
     auto func_find = func_map.find(addr);
     if (func_find == func_map.end() && missing_function_handler != nullptr) {
         // [wcw fullconv] code a de-relinked hack loaded into RAM at run time: compile it once, keep it registered
         std::lock_guard lock{ missing_function_mutex };
         func_find = func_map.find(addr);
         if (func_find == func_map.end()) {
+            // not kept in func_map: RAM code can change under the same address (overlays swap, buffers get reloaded),
+            // so the handler checks its own cache each time
             if (recomp_func_t* func = missing_function_handler(addr)) {
-                func_map[addr] = func;
                 return func;
             }
         }
     }
     if (func_find == func_map.end()) {
         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
+        fprintf(stderr, "  this thread's previous lookups (oldest first):");
+        for (uint32_t i = 1; i < 16; i++) {
+            fprintf(stderr, " %08X", lookup_history[(lookup_history_pos - 1 + i) & 15]);
+        }
+        fprintf(stderr, "\n");
         assert(false);
         std::exit(EXIT_FAILURE);
     }

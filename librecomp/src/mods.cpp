@@ -2215,6 +2215,8 @@ std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle> apply_regenlist(Regenera
 static uint8_t* relink_rdram = nullptr;
 static std::vector<std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle>> ram_code_handles{};
 static std::mutex ram_code_mutex{};
+struct RamCode { recomp_func_t* func; uint32_t size; uint64_t hash; };
+static std::unordered_map<uint32_t, RamCode> ram_code_cache{};
 
 static recomp_func_t* compile_ram_function(int32_t addr) {
     using namespace recomp::mods;
@@ -2224,81 +2226,127 @@ static recomp_func_t* compile_ram_function(int32_t addr) {
     }
     std::lock_guard lock{ ram_code_mutex };
     auto word = [](uint32_t v) { return *reinterpret_cast<const uint32_t*>(relink_rdram + (v - 0x80000000)); };
-    const uint32_t limit = std::min<uint32_t>(a + 0x8000, 0x80800000);
-    std::unordered_set<uint32_t> seen{};
-    std::vector<uint32_t> work{ a };
-    uint32_t end = a;
-    while (!work.empty()) {
-        uint32_t pc = work.back();
-        work.pop_back();
-        while (pc >= a && pc < limit && !seen.contains(pc)) {
-            seen.insert(pc);
-            const uint32_t w = word(pc);
-            const uint32_t op = w >> 26, rt = (w >> 16) & 31;
-            // a word no game code contains ends the code (don't trace on into data)
-            const uint32_t funct = w & 0x3F;
-            const bool invalid = op == 0x12 || op == 0x13 || (op >= 0x1C && op <= 0x1F) || op == 0x3B ||
-                (op == 0 && (funct == 0x01 || funct == 0x05 || funct == 0x0E || funct == 0x15 || funct == 0x28 ||
-                             funct == 0x29 || funct == 0x35 || funct == 0x37 || funct == 0x39 || funct == 0x3D ||
-                             ((funct <= 0x03 || (funct >= 0x38 && funct != 0x39 && funct != 0x3D)) && ((w >> 21) & 31) != 0)));
-            if (invalid) {
-                break;
-            }
-            end = std::max(end, pc + 8);
-            const bool branch = (op >= 4 && op <= 7) || (op >= 0x14 && op <= 0x17) ||
-                (op == 1 && (rt <= 3 || (rt >= 0x10 && rt <= 0x13)));
-            if (branch) {
-                const uint32_t t = pc + 4 + (uint32_t)((int32_t)(int16_t)(w & 0xFFFF) << 2);
-                if (t >= a && t < limit && !seen.contains(t)) {
-                    work.push_back(t);
-                }
-                if (op == 4 && ((w >> 16) & 0x3FF) == 0) {
-                    break;                                          // b: unconditional
-                }
-            }
-            if (op == 2 || (op == 0 && (w & 0x3F) == 0x08)) {
-                break;                                              // j / jr (the slot is in: pc + 8)
-            }
-            pc += 4;
+    // compiled before and the code there unchanged (its first 64 words): reuse it
+    auto code_hash = [&](uint32_t size) {
+        uint64_t h = 0xCBF29CE484222325ull;
+        for (uint32_t i = 0; i < std::min<uint32_t>(size, 0x100) && a + i < 0x80800000; i += 4) {
+            h = (h ^ word(a + i)) * 0x100000001B3ull;
         }
-    }
-    const uint32_t size = std::min(end, limit) - a;
-    // The code as a big-endian "ROM" of its own (section at rom 0, ram a).
-    auto bytes = std::make_shared<std::vector<uint8_t>>(size);
-    for (uint32_t i = 0; i < size; i += 4) {
-        const uint32_t w = word(a + i);
-        (*bytes)[i] = uint8_t(w >> 24); (*bytes)[i + 1] = uint8_t(w >> 16); (*bytes)[i + 2] = uint8_t(w >> 8); (*bytes)[i + 3] = uint8_t(w);
-    }
-    RegeneratedList regenlist{};
-    regenlist.sections.emplace_back(RegeneratedSection{ .rom_addr = 0, .ram_addr = a, .original_index = 0,
-        .first_func_index = 0, .first_reloc_index = 0, .relocatable = false });
-    regenlist.functions.emplace_back(RegeneratedFunction{ .section_offset = 0, .size = size });
-    regenlist.func_ptrs.push_back(nullptr);
-    N64Recomp::Context context = context_from_regenerated_list(regenlist, std::span<const uint8_t>{ *bytes });
-    context.set_all_reference_sections_relocatable();
-    context.use_lookup_for_all_function_calls = true;
-    context.tail_call_unknown_jumps_by_lookup = true;
-    context.external_code_ranges = relink_code_ranges;
-    ModCodeHandleInputs handle_inputs{
-        .base_event_index = 0,
-        .recomp_trigger_event = recomp_trigger_event,
-        .get_function = get_function,
-        .cop0_status_write = cop0_status_write,
-        .cop0_status_read = cop0_status_read,
-        .switch_error = switch_error,
-        .do_break = do_break,
-        .reference_section_addresses = section_addresses,
+        return h;
     };
-    auto handle = std::make_unique<LiveRecompilerCodeHandle>(context, handle_inputs,
-        std::unordered_map<size_t, size_t>{}, std::unordered_map<size_t, size_t>{}, std::vector<size_t>(1, 0), true);
-    std::string err{};
-    if (!handle->good() || handle->populate_reference_symbols(context, err) != CodeModLoadError::Good) {
-        fprintf(stderr, "[relink] RAM code at 0x%08X (%u bytes) could not be recompiled\n", a, size);
+    if (auto it = ram_code_cache.find(a); it != ram_code_cache.end()) {
+        if (code_hash(it->second.size) == it->second.hash) {
+            return it->second.func;
+        }
+        fprintf(stderr, "[relink] RAM code at 0x%08X changed: recompiling\n", a);
+    }
+    const uint32_t limit = std::min<uint32_t>(a + 0x8000, 0x80800000);
+    // a word no game code contains: no R4300 instruction, a trap (games don't use them), a shift-immediate with rs
+    // set, a jalr linking another register than ra (the recompiler can't), COP0/COP1 forms games don't use
+    auto not_game_code = [](uint32_t w) {
+        const uint32_t op = w >> 26, rt = (w >> 16) & 31, funct = w & 0x3F, rs = (w >> 21) & 31, rd = (w >> 11) & 31;
+        return op == 0x12 || op == 0x13 || (op >= 0x1C && op <= 0x1F) || op == 0x3B ||
+            (op == 0 && (funct == 0x01 || funct == 0x05 || funct == 0x0A || funct == 0x0B || funct == 0x0E ||
+                         funct == 0x15 || funct == 0x28 || funct == 0x29 || (funct >= 0x30 && funct <= 0x37) ||
+                         funct == 0x39 || funct == 0x3D ||
+                         ((funct <= 0x03 || (funct >= 0x38 && funct != 0x39 && funct != 0x3D)) && rs != 0) ||
+                         (funct == 0x09 && rd != 31) || (funct == 0x08 && (w & 0x1FFFC0) != 0))) ||
+            (op == 1 && !(rt <= 3 || (rt >= 0x10 && rt <= 0x13))) ||
+            (op == 0x10 && !((rs == 0 && (rd == 12 || rd == 1)) || (rs == 4 && rd == 12))) ||
+            (op == 0x11 && !(rs <= 2 || rs == 4 || rs == 5 || rs == 6 || rs == 8 || rs == 0x10 || rs == 0x11 || rs == 0x14 || rs == 0x15));
+    };
+    recomp_func_t* func = nullptr;
+    std::unique_ptr<LiveRecompilerCodeHandle> handle{};
+    uint32_t size = 0;
+    // the extent traced from the entry; when that doesn't compile (data the trace took for code), the straight-line
+    // code from the entry to its first j / jr / b, its branches out becoming lookups
+    for (int minimal = 0; minimal < 2 && func == nullptr; minimal++) {
+        std::unordered_set<uint32_t> seen{};
+        std::vector<uint32_t> work{ a };
+        uint32_t end = a;
+        while (!work.empty()) {
+            uint32_t pc = work.back();
+            work.pop_back();
+            while (pc >= a && pc < limit && !seen.contains(pc)) {
+                seen.insert(pc);
+                const uint32_t w = word(pc);
+                const uint32_t op = w >> 26, rt = (w >> 16) & 31;
+                // one ends the code (don't trace on into data)
+                if (not_game_code(w)) {
+                    break;
+                }
+                end = std::max(end, pc + 8);
+                const bool branch = (op >= 4 && op <= 7) || (op >= 0x14 && op <= 0x17) ||
+                    (op == 1 && (rt <= 3 || (rt >= 0x10 && rt <= 0x13)));
+                if (branch) {
+                    const uint32_t t = pc + 4 + (uint32_t)((int32_t)(int16_t)(w & 0xFFFF) << 2);
+                    if (!minimal && t >= a && t < limit && !seen.contains(t)) {
+                        work.push_back(t);
+                    }
+                    if (op == 4 && ((w >> 16) & 0x3FF) == 0) {
+                        break;                                          // b: unconditional
+                    }
+                }
+                if (op == 2 || (op == 0 && (w & 0x3F) == 0x08)) {
+                    break;                                              // j / jr (the slot is in: pc + 8)
+                }
+                pc += 4;
+            }
+        }
+        size = std::min(end, limit) - a;
+        // RDRAM as a big-endian "ROM" (section at rom a - 0x80000000, ram a), so jump tables anywhere in RAM resolve
+        // (a stock overlay function a hook re-enters in the middle switches through its overlay's table)
+        const uint32_t ram_size = 0x800000;
+        auto bytes = std::make_shared<std::vector<uint8_t>>(ram_size);
+        for (uint32_t i = 0; i < ram_size; i += 4) {
+            uint32_t w = *reinterpret_cast<const uint32_t*>(relink_rdram + i);
+            const uint32_t v = 0x80000000 + i;
+            if (v >= a && v < a + size && not_game_code(w)) {
+                w = 0x0000000D;                                        // untraced data inside the extent: break
+            }
+            (*bytes)[i] = uint8_t(w >> 24); (*bytes)[i + 1] = uint8_t(w >> 16); (*bytes)[i + 2] = uint8_t(w >> 8); (*bytes)[i + 3] = uint8_t(w);
+        }
+        RegeneratedList regenlist{};
+        regenlist.sections.emplace_back(RegeneratedSection{ .rom_addr = a - 0x80000000, .ram_addr = a, .original_index = 0,
+            .first_func_index = 0, .first_reloc_index = 0, .relocatable = false });
+        regenlist.functions.emplace_back(RegeneratedFunction{ .section_offset = 0, .size = size });
+        regenlist.func_ptrs.push_back(nullptr);
+        N64Recomp::Context context = context_from_regenerated_list(regenlist, std::span<const uint8_t>{ *bytes });
+        context.set_all_reference_sections_relocatable();
+        context.use_lookup_for_all_function_calls = true;
+        context.tail_call_unknown_jumps_by_lookup = true;
+        context.external_code_ranges = relink_code_ranges;
+        context.jump_table_data_ranges = { { 0x80000000, 0x80000000 + ram_size, 0 } };
+        ModCodeHandleInputs handle_inputs{
+            .base_event_index = 0,
+            .recomp_trigger_event = recomp_trigger_event,
+            .get_function = get_function,
+            .cop0_status_write = cop0_status_write,
+            .cop0_status_read = cop0_status_read,
+            .switch_error = switch_error,
+            .do_break = do_break,
+            .reference_section_addresses = section_addresses,
+        };
+        handle = std::make_unique<LiveRecompilerCodeHandle>(context, handle_inputs,
+            std::unordered_map<size_t, size_t>{}, std::unordered_map<size_t, size_t>{}, std::vector<size_t>(1, 0), true);
+        std::string err{};
+        if (!handle->good() || handle->populate_reference_symbols(context, err) != CodeModLoadError::Good) {
+            fprintf(stderr, "[relink] RAM code at 0x%08X (%u bytes) could not be recompiled%s\n", a, size, minimal ? "" : ": trying its straight-line code");
+            continue;
+        }
+        func = std::get<recomp_func_t*>(handle->get_function_handle(0));
+    }
+    if (func == nullptr) {
         return nullptr;
     }
-    recomp_func_t* func = std::get<recomp_func_t*>(handle->get_function_handle(0));
-    fprintf(stderr, "[relink] recompiled RAM code at 0x%08X (%u bytes, loaded at run time)\n", a, size);
+    fprintf(stderr, "[relink] recompiled RAM code at 0x%08X (%u bytes, loaded at run time) host %p\n", a, size, (void*)func);
+    if (getenv("WCW_RAMCODE_LOG") != nullptr) {
+        for (uint32_t i = 0; i < size && i < 0x400; i += 4) {
+            fprintf(stderr, "[relink]   %08X %08X\n", a + i, word(a + i));
+        }
+    }
     ram_code_handles.emplace_back(std::move(handle));
+    ram_code_cache[a] = RamCode{ func, size, code_hash(size) };
     return func;
 }
 
