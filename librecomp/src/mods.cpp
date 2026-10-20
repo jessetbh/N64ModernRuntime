@@ -21,6 +21,9 @@ static std::vector<std::pair<uint32_t, uint32_t>> relink_code_ranges{};
 // [wcw fullconv] Where data the hack moved lives in the ROM (relink.json "data_ranges": the
 // Expansion-RAM payload), for jump tables the hack put there.
 static std::vector<std::array<uint32_t, 3>> relink_data_ranges{};
+// [wcw fullconv] Stock functions the hack turned into data (relink.json "data_functions": ROM offsets).
+// They're dead code now: keep the static function instead of recompiling the data.
+static std::unordered_set<uint32_t> relink_data_functions{};
 
 static bool read_json(std::ifstream input_file, nlohmann::json &json_out) {
     if (!input_file.good()) {
@@ -1753,6 +1756,7 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_mo
         std::vector<char> relink_data = mod.manifest.file_handle->read_file("relink.json", relink_exists);
         relink_code_ranges.clear();
         relink_data_ranges.clear();
+        relink_data_functions.clear();
         if (relink_exists) {
             nlohmann::json relink_json = nlohmann::json::parse(relink_data.begin(), relink_data.end(), nullptr, false);
             if (relink_json.is_object()) {
@@ -1764,6 +1768,11 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_mo
                 for (const nlohmann::json& r : relink_json.value("data_ranges", nlohmann::json::array())) {
                     if (r.is_array() && r.size() == 3) {
                         relink_data_ranges.push_back({ r[0].get<uint32_t>(), r[1].get<uint32_t>(), r[2].get<uint32_t>() });
+                    }
+                }
+                for (const nlohmann::json& r : relink_json.value("data_functions", nlohmann::json::array())) {
+                    if (r.is_number_unsigned()) {
+                        relink_data_functions.insert(r.get<uint32_t>());
                     }
                 }
             }
@@ -2225,6 +2234,14 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::regener
             if ((end > unpatched_rom.size()) || (end > patched_rom.size()) ||
                 (memcmp(unpatched_rom.data() + start, patched_rom.data() + start, func.rom_size) == 0))
             {
+                continue;
+            }
+
+            // [wcw fullconv] Dead code the hack filled with data: nothing calls it, keep the static function.
+            if (relink_data_functions.contains(static_cast<uint32_t>(start))) {
+                fprintf(stderr, "[romhack] %s: 0x%08X holds data now; keeping the static function\n",
+                    mod_id.c_str(), section.ram_addr + func.offset);
+                num_skipped++;
                 continue;
             }
 
