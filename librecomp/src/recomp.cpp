@@ -769,6 +769,14 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
                             mod_error_stream << "\n";                                
                         }
                         ultramodern::error_handling::message_box(mod_error_stream.str().c_str());
+                        // [wcw fix] A quit requested while the error box was up (quit() only moves None to
+                        // Quit, and the status was Running) would otherwise leave this thread waiting for a start
+                        // that never comes, and the process never exits.
+                        if (exited.load()) {
+                            game_status.store(GameStatus::Quit);
+                            game_status.notify_all();
+                            return true;
+                        }
                         game_status.store(GameStatus::None);
                         return false;
                     }
