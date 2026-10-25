@@ -849,13 +849,15 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
                         ultramodern::error_handling::message_box(mod_error_stream.str().c_str());
                         // [wcw fullconv] A quit requested while the error box was up (quit() only moves None to
                         // Quit, and the status was Running) would otherwise leave this thread waiting for a start
-                        // that never comes, and the process never exits.
+                        // that never comes, and the process never exits. None is stored before exited is read
+                        // (both seq_cst): a quit() that comes after the store finds None and moves it to Quit
+                        // itself, and one that came before it is seen here, so no quit falls in between.
+                        game_status.store(GameStatus::None);
                         if (exited.load()) {
                             game_status.store(GameStatus::Quit);
                             game_status.notify_all();
                             return true;
                         }
-                        game_status.store(GameStatus::None);
                         return false;
                     }
                 }
