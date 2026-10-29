@@ -115,6 +115,21 @@ namespace recomp::mods::conversion {
         return enabled;
     }
 
+    StartupChoice choose_startup(const char *env_value, const std::string &choice_file_text) {
+        StartupChoice choice;
+        if ((env_value != nullptr) && (env_value[0] != '\0')) {
+            choice.id = env_value;
+            choice.from_launcher = true;
+            return choice;
+        }
+
+        const std::string line = choice_file_text.substr(0, choice_file_text.find_first_of("\r\n"));
+        const size_t first = line.find_first_not_of(" \t");
+        const size_t last = line.find_last_not_of(" \t");
+        choice.id = (first == std::string::npos) ? std::string() : line.substr(first, last - first + 1);
+        return choice;
+    }
+
     bool resolve_save_subfolder(const char *env_value, const std::string &patch_mod_id, std::string &out) {
         if ((env_value == nullptr) || (env_value[0] == '\0')) {
             out = patch_mod_id;

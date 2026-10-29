@@ -81,7 +81,9 @@ std::filesystem::path recomp::save_backups::main_save_file() {
 std::u8string recomp::get_save_subfolder() {
     std::string out;
     const std::u8string patch = recomp::mods::get_rom_patch_save_subfolder();
-    if (!recomp::mods::conversion::resolve_save_subfolder(std::getenv(recomp::mods::conversion::EnvVar),
+    // [wcw fullconv] The session's conversion (the launcher's AKI_CONVERSION or the Mods-menu choice, aki-roadmap#57).
+    const std::string conversion_id = recomp::mods::session_conversion_id();
+    if (!recomp::mods::conversion::resolve_save_subfolder(conversion_id.empty() ? nullptr : conversion_id.c_str(),
         std::string{ reinterpret_cast<const char*>(patch.data()), patch.size() }, out)) {
         return u8"_invalid_conversion";
     }

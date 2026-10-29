@@ -1,5 +1,6 @@
 // [wcw fullconv] The active conversion (AKI_CONVERSION): read once at the first mod scan. See conversion.hpp.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -10,6 +11,7 @@
 #include "librecomp/conversion.hpp"
 #include "librecomp/conversion_codes.hpp"
 #include "librecomp/files.hpp"
+#include "librecomp/game.hpp"
 #include "ultramodern/error_handling.hpp"
 
 namespace {
@@ -18,6 +20,11 @@ namespace {
     std::filesystem::path active_folder;
     std::string port_rom_revision;
     std::string cheats_mod_id = "aki_cheats";
+
+    // The session's conversion, decided once (aki-roadmap#57): the mod scan and the save folder both use it.
+    bool session_decided = false;
+    recomp::mods::conversion::StartupChoice session_choice;
+    std::string choice_notice; // why a Mods-menu choice couldn't run (logged at the mod scan, shown by the Mods menu)
 
     std::string read_text(const std::filesystem::path &path) {
         std::ifstream file(path, std::ios::binary);
@@ -38,14 +45,158 @@ namespace {
 }
 
 namespace recomp::mods {
+    // Decides once which conversion this session runs: the launcher's AKI_CONVERSION, else the Mods-menu choice in
+    // conversions/active.txt. A choice that can't run (bad id, not installed, unreadable aki.json) is dropped: the game
+    // starts normally, active.txt is removed and the scan shows why. Called with conversion_mutex held.
+    static const conversion::StartupChoice &decide_session(const std::filesystem::path &config_path) {
+        if (session_decided) {
+            return session_choice;
+        }
+
+        session_decided = true;
+        const std::filesystem::path choice_file = config_path / conversion::Folder / conversion::ChoiceFile;
+        session_choice = conversion::choose_startup(std::getenv(conversion::EnvVar), read_text(choice_file));
+        if (!session_choice.lenient()) {
+            return session_choice;
+        }
+
+        const std::string id = session_choice.id;
+        std::string reason;
+        if (!conversion::valid_id(id)) {
+            reason = "\"" + id + "\" is not a valid conversion id";
+        }
+        else {
+            const std::string text = read_text(config_path / conversion::Folder / id / conversion::ManifestFile);
+            conversion::Conversion c;
+            std::string error;
+            if (text.empty()) {
+                reason = "it isn't installed any more";
+            }
+            else if (!conversion::parse(text, id, c, error)) {
+                reason = error;
+            }
+        }
+
+        if (!reason.empty()) {
+            choice_notice = "The conversion chosen in the Mods menu (" + id + ") can't run: " + reason +
+                ". The game starts normally with your own saves, and the choice was cleared.";
+            std::error_code ec;
+            std::filesystem::remove(choice_file, ec);
+            session_choice = conversion::StartupChoice{};
+        }
+
+        return session_choice;
+    }
+
+    std::string session_conversion_id() {
+        std::lock_guard lock(conversion_mutex);
+        const std::filesystem::path config_path = recomp::get_config_path();
+        if (config_path.empty()) {
+            const char *env = std::getenv(conversion::EnvVar);
+            return (env != nullptr) ? std::string(env) : std::string();
+        }
+
+        return decide_session(config_path).id;
+    }
+
+    std::string conversion_choice_notice() {
+        std::lock_guard lock(conversion_mutex);
+        return choice_notice;
+    }
+
+    std::string chosen_conversion() {
+        const std::filesystem::path config_path = recomp::get_config_path();
+        if (config_path.empty()) {
+            return {};
+        }
+
+        return conversion::choose_startup(nullptr, read_text(config_path / conversion::Folder / conversion::ChoiceFile)).id;
+    }
+
+    bool set_chosen_conversion(const std::string &id) {
+        const std::filesystem::path config_path = recomp::get_config_path();
+        if (config_path.empty() || (!id.empty() && !conversion::valid_id(id))) {
+            return false;
+        }
+
+        const std::filesystem::path folder = config_path / conversion::Folder;
+        const std::filesystem::path file = folder / conversion::ChoiceFile;
+        std::error_code ec;
+        if (id.empty()) {
+            std::filesystem::remove(file, ec);
+            return !ec;
+        }
+
+        std::filesystem::create_directories(folder, ec);
+        const std::filesystem::path temp = folder / (std::string(conversion::ChoiceFile) + ".tmp");
+        {
+            std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+            out << id << "\n";
+            if (!out.good()) {
+                return false;
+            }
+        }
+
+        std::filesystem::rename(temp, file, ec);
+        return !ec;
+    }
+
+    std::vector<InstalledConversion> list_installed_conversions() {
+        std::vector<InstalledConversion> out;
+        const std::filesystem::path config_path = recomp::get_config_path();
+        if (config_path.empty()) {
+            return out;
+        }
+
+        std::error_code ec;
+        for (const auto &entry : std::filesystem::directory_iterator(config_path / conversion::Folder, ec)) {
+            if (!entry.is_directory(ec)) {
+                continue;
+            }
+
+            const std::u8string name8 = entry.path().filename().u8string();
+            const std::string id(reinterpret_cast<const char *>(name8.data()), name8.size());
+            if (!conversion::valid_id(id)) {
+                continue; // _packages and other folders that aren't conversions
+            }
+
+            InstalledConversion installed;
+            installed.folder = entry.path();
+            const std::string text = read_text(entry.path() / conversion::ManifestFile);
+            if (text.empty()) {
+                continue;
+            }
+
+            if (!conversion::parse(text, id, installed.conversion, installed.error)) {
+                installed.conversion.id = id;
+                installed.conversion.name = id;
+            }
+
+            out.emplace_back(std::move(installed));
+        }
+
+        std::sort(out.begin(), out.end(), [](const InstalledConversion &a, const InstalledConversion &b) {
+            return a.conversion.name < b.conversion.name;
+        });
+        return out;
+    }
+
     // Called by scan_mods: loads <config>/conversions/<AKI_CONVERSION>/aki.json and returns the folders whose mods the
     // session runs (the conversion's own, plus its texture dependency package when installed). Empty: no conversion.
     std::vector<std::filesystem::path> load_active_conversion(const std::filesystem::path &config_path) {
         std::lock_guard lock(conversion_mutex);
         active.reset();
         active_folder.clear();
-        const char *id = std::getenv(conversion::EnvVar);
-        if ((id == nullptr) || (id[0] == '\0')) {
+        const conversion::StartupChoice &choice = decide_session(config_path);
+        if (!choice_notice.empty()) {
+            // Not a message box: the game starts normally, so nothing needs confirming before it (a modal here also
+            // held up unattended starts). The Mods menu's Conversions dialog shows it.
+            fprintf(stderr, "[conversion] %s\n", choice_notice.c_str());
+        }
+
+        const std::string id_text = choice.id;
+        const char *id = id_text.c_str();
+        if (id_text.empty()) {
             return {};
         }
 

@@ -8,6 +8,7 @@
 // and unit tested (tests/wcw/conversion_tests.cpp).
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -21,6 +22,9 @@ namespace recomp {
             constexpr const char *Folder = "conversions";
             constexpr const char *PackagesFolder = "_packages";
             constexpr const char *ManifestFile = "aki.json";
+            // The conversion picked in the game's Mods menu, for the next starts (aki-roadmap#57): one id in
+            // <config>/conversions/active.txt. AKI_CONVERSION (the launcher) wins over it.
+            constexpr const char *ChoiceFile = "active.txt";
 
             struct Conversion {
                 std::string id;
@@ -61,13 +65,42 @@ namespace recomp {
             // then (falling back to the normal saves would let a conversion overwrite the player's progress).
             bool resolve_save_subfolder(const char *env_value, const std::string &patch_mod_id, std::string &out);
 
+            // Which conversion a session starts with (aki-roadmap#57). The launcher's AKI_CONVERSION (env_value) wins and is
+            // strict: an id that can't run refuses to start, as before. Otherwise the Mods-menu choice (choice_file_text, the
+            // text of conversions/active.txt; its first line, trimmed) is lenient: if it can't run the game starts
+            // normally instead (see lenient). Both empty: no conversion.
+            struct StartupChoice {
+                std::string id;
+                bool from_launcher = false;
+                bool lenient() const { return !from_launcher && !id.empty(); }
+            };
+            StartupChoice choose_startup(const char *env_value, const std::string &choice_file_text);
+
             // Whether codes written for codes_rom may run on this port: the same game (the cheats engine translates another
             // revision's addresses itself); "" (unknown) and other games are refused.
             bool codes_runnable(const std::string &codes_rom, const std::string &port_rom);
         }
 
-        // The conversion this session runs (AKI_CONVERSION), or nullptr. Set by scan_mods.
+        // The conversion this session runs (AKI_CONVERSION or the Mods-menu choice), or nullptr. Set by scan_mods.
         const conversion::Conversion *active_conversion();
+        // Its id ("" = none), decided once per session (conversion::choose_startup); the save folder follows it.
+        std::string session_conversion_id();
+
+        // The Mods menu's conversion picker (aki-roadmap#57). An installed conversion: its parsed aki.json, or error set
+        // (id and name are then the folder name).
+        struct InstalledConversion {
+            conversion::Conversion conversion;
+            std::filesystem::path folder;
+            std::string error;
+        };
+        // The conversions installed in <config>/conversions/, by name.
+        std::vector<InstalledConversion> list_installed_conversions();
+        // The id in conversions/active.txt ("" = none): the conversion the next start runs when the launcher sets none.
+        std::string chosen_conversion();
+        // Writes (or, for "", removes) conversions/active.txt. False for an invalid id or a failed write.
+        bool set_chosen_conversion(const std::string &id);
+        // Why this session's Mods-menu choice couldn't run and was cleared ("" = it ran, or there was none).
+        std::string conversion_choice_notice();
         // The active conversion's codes file text, or "" (no conversion, no codes, or codes for another revision).
         std::string active_conversion_codes();
         // The ROM revision tag codes must have to run on this port (e.g. "nomercy-rev1"); set by the game.

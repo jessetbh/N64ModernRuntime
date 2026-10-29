@@ -130,6 +130,34 @@ namespace {
     }
 }
 
+TEST_CASE("conversion: the launcher's AKI_CONVERSION wins over the Mods-menu choice and is strict (#57)") {
+    StartupChoice c = choose_startup("aew64", "nomercy_unlocked\n");
+    CHECK(c.id == "aew64");
+    CHECK(c.from_launcher);
+    CHECK(!c.lenient());
+    // An id the launcher passes is never second-guessed here: the loader refuses a bad one, as before.
+    c = choose_startup("Not Valid!", "aew64\n");
+    CHECK(c.id == "Not Valid!");
+    CHECK(c.from_launcher);
+}
+
+TEST_CASE("conversion: without the launcher, conversions/active.txt's first line (trimmed) is a lenient choice (#57)") {
+    StartupChoice c = choose_startup(nullptr, "aew64\r\nleftover\n");
+    CHECK(c.id == "aew64");
+    CHECK(!c.from_launcher);
+    CHECK(c.lenient());
+    CHECK(choose_startup("", "  revse \t\n").id == "revse");
+    CHECK(choose_startup(nullptr, "nomercy_unlocked").id == "nomercy_unlocked");
+}
+
+TEST_CASE("conversion: no launcher id and an empty or blank choice file mean no conversion (#57)") {
+    CHECK(choose_startup(nullptr, "").id.empty());
+    CHECK(choose_startup(nullptr, "   \n").id.empty());
+    CHECK(choose_startup("", "\r\n").id.empty());
+    CHECK(!choose_startup(nullptr, "").lenient());
+    CHECK(!choose_startup(nullptr, "").from_launcher);
+}
+
 TEST_CASE("conversion codes: grammar, tags and what is ignored") {
     std::vector<codes::Code> out;
     codes::Report r;
