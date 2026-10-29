@@ -31,6 +31,11 @@ TEST_CASE("dd breadcrumb: the event line matches rt64's DogStatsD format (length
     CHECK(event_line("a\nb", "x\r", {}, "", "") == "_e{3,1}:a b|x|s:aki-game");
 }
 
+TEST_CASE("dd breadcrumb: the title reads like rt64's session events (aki-game <game>: ...)") {
+    CHECK(fatal_title("nomercy", "switch-case out of bounds") == "aki-game nomercy: switch-case out of bounds");
+    CHECK(fatal_title("", "break") == "aki-game: break");
+}
+
 TEST_CASE("dd breadcrumb: tags: the game, kind:fatal, then WCW_DD_TAGS without repeating a key") {
     const std::vector<std::string> tags = fatal_tags("nomercy", " conversion:nmp , game:other,,owner:jesse ");
     CHECK(tags.size() == 4);

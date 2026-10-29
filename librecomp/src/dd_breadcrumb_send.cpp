@@ -35,7 +35,8 @@ namespace recomp {
                 }
             }
 
-            const std::string line = event_line(title, text, fatal_tags(game, std::getenv("WCW_DD_TAGS")), "error", "fatal");
+            const std::string line = event_line(fatal_title(game, title), text, fatal_tags(game, std::getenv("WCW_DD_TAGS")),
+                "error", "fatal");
             unsigned port = 8125;
             if (const char* p = std::getenv("WCW_DD_PORT")) {
                 const long v = std::strtol(p, nullptr, 10);

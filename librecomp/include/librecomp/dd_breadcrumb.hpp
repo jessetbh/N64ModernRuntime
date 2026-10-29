@@ -27,6 +27,10 @@ namespace recomp {
         // (a key already given is not repeated).
         std::vector<std::string> fatal_tags(const std::string& game, const char* extra_tags);
 
+        // The event title as rt64 writes its play-session events: "aki-game <game>: <what>" ("aki-game: <what>" without
+        // a game), so the breadcrumb sorts with the session in the event stream.
+        std::string fatal_title(const std::string& game, const std::string& what);
+
         // Sends one error event "<title>" with text to the local Agent, if WCW_DD_METRICS is on; never throws, never
         // blocks for long (one UDP datagram). Safe to call on the way out of the process.
         void fatal(const std::string& title, const std::string& text);

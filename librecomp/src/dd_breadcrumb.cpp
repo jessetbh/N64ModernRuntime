@@ -81,6 +81,10 @@ namespace recomp {
             return line;
         }
 
+        std::string fatal_title(const std::string& game, const std::string& what) {
+            return "aki-game" + (game.empty() ? std::string() : " " + game) + ": " + what;
+        }
+
         std::vector<std::string> fatal_tags(const std::string& game, const char* extra_tags) {
             std::vector<std::string> tags;
             if (!game.empty()) {
