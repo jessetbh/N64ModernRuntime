@@ -668,6 +668,16 @@ namespace recomp {
         // Refuse: don't load the mod (FailedToLoadPatch). Call before the mods are loaded; later calls replace the list.
         enum class RepairedFunctionPolicy { Warn, Refuse };
         void register_repaired_functions(std::span<recomp_func_t* const> funcs, RepairedFunctionPolicy policy);
+        // [wcw fullconv] Entry prologues (aki-roadmap#76, librecomp/entry_prologue_rules.hpp): code the port hand-added
+        // at the start of a static function, as a function of its own. When the live recompiler replaces that function
+        // (a ROM patch changed it, or a mod hooks it), the replacement calls the prologue at its entry, so the hand-edit
+        // isn't lost. A prologue observes only: the registers are restored after it. Call before the mods are loaded;
+        // later calls replace the list.
+        struct EntryPrologue {
+            recomp_func_t* func;
+            recomp_func_t* prologue;
+        };
+        void register_entry_prologues(std::span<const EntryPrologue> prologues);
         std::vector<ModDetails> get_all_mod_details(const std::string& mod_game_id);
         size_t game_mode_count(const std::string& mod_game_id, bool include_disabled);
         recomp::Version get_mod_version(size_t mod_index);
