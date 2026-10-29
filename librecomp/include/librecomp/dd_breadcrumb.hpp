@@ -15,25 +15,38 @@ namespace recomp {
         // Whether an environment value turns a switch on: set, not empty and not "0" (rt64's envSwitchOn).
         bool switch_on(const char* value);
 
-        // Tags from WCW_DD_TAGS ("a:b,c:d"): trimmed, empty ones dropped.
+        // One tag as rt64's ddTag: key and value lower case, other characters as '_' (key: a-z 0-9 _ - . /, value
+        // also ':'), a key not starting with a letter gets "t_", at most 200 characters; empty for an empty value.
+        std::string tag(const std::string& key, const std::string& value);
+
+        // Tags from WCW_DD_TAGS ("a:b,c:d") as rt64's ddParseTags: entries without ':' dropped, each through tag(),
+        // exact duplicates once.
         std::vector<std::string> parse_tags(const char* value);
+
+        // The game name as rt64's ddGameFromExe: the exe's file name, lower case, without .exe and "recompiled"
+        // (NoMercyRecompiled.exe: nomercy; WCWRecompiled.exe: wt).
+        std::string game_from_exe(const std::string& exe_name);
+
+        // WCW_DD_GAME when set and not empty, else game_from_exe (rt64's rule).
+        std::string fatal_game(const char* env_game, const std::string& exe_name);
 
         // A DogStatsD event: _e{title length,text length}:title|text|k:key|s:aki-game|t:alert|#tags. A newline in the
         // title becomes a space, in the text \n; carriage returns go.
         std::string event_line(const std::string& title, const std::string& text, const std::vector<std::string>& tags,
             const std::string& alert_type, const std::string& aggregation_key);
 
-        // The tags of a fatal event: game:<WCW_DD_GAME, else the running game's id>, kind:fatal, then WCW_DD_TAGS
-        // (a key already given is not repeated).
+        // The tags of a fatal event: game:<game>, kind:fatal, then WCW_DD_TAGS (not game or kind).
         std::vector<std::string> fatal_tags(const std::string& game, const char* extra_tags);
 
         // The event title as rt64 writes its play-session events: "aki-game <game>: <what>" ("aki-game: <what>" without
         // a game), so the breadcrumb sorts with the session in the event stream.
         std::string fatal_title(const std::string& game, const std::string& what);
 
-        // Sends one error event "<title>" with text to the local Agent, if WCW_DD_METRICS is on; never throws, never
-        // blocks for long (one UDP datagram). Safe to call on the way out of the process.
-        void fatal(const std::string& title, const std::string& text);
+        // Sends one error event "aki-game <game>: <title>" with text to the local Agent, if WCW_DD_METRICS is on. Never
+        // throws (it runs on the way out of the process, from extern "C" code), never blocks for long (one UDP
+        // datagram), and reads nothing the shutdown may have reset (the game name comes from the exe, not the
+        // running game).
+        void fatal(const std::string& title, const std::string& text) noexcept;
     }
 }
 

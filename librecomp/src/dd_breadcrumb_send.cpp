@@ -16,25 +16,38 @@
 #   include <unistd.h>
 #endif
 
-#include "librecomp/game.hpp"
 
 namespace recomp {
     namespace dd {
-        void fatal(const std::string& title, const std::string& text) {
+        static void send_fatal(const std::string& title, const std::string& text);
+
+        static std::string exe_name() {
+#if defined(_WIN32)
+            char path[MAX_PATH] = {};
+            const DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+            return std::string(path, (n < MAX_PATH) ? n : 0);
+#else
+            char path[4096] = {};
+            const ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 1);
+            return (n > 0) ? std::string(path, size_t(n)) : std::string();
+#endif
+        }
+
+        void fatal(const std::string& title, const std::string& text) noexcept {
+            try {
+                send_fatal(title, text);
+            }
+            catch (...) {
+                // Nothing to do on the way out.
+            }
+        }
+
+        void send_fatal(const std::string& title, const std::string& text) {
             if (!switch_on(std::getenv("WCW_DD_METRICS"))) {
                 return;
             }
 
-            std::string game;
-            if (const char* g = std::getenv("WCW_DD_GAME")) {
-                game = g;
-            }
-            else {
-                for (char8_t c : recomp::current_game_id()) {
-                    game.push_back(char(c));
-                }
-            }
-
+            const std::string game = fatal_game(std::getenv("WCW_DD_GAME"), exe_name());
             const std::string line = event_line(fatal_title(game, title), text, fatal_tags(game, std::getenv("WCW_DD_TAGS")),
                 "error", "fatal");
             unsigned port = 8125;
