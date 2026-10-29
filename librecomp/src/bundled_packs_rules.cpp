@@ -7,7 +7,7 @@
 #include "json/json.hpp"
 
 namespace recomp::mods::bundled_packs {
-    static bool is_text_file(const std::string &path) {
+    bool is_text_file(const std::string &path) {
         // The extension as Python's os.path.splitext sees it: leading dots of the file name don't start one.
         const size_t slash = path.find_last_of('/');
         std::string name = (slash == std::string::npos) ? path : path.substr(slash + 1);
