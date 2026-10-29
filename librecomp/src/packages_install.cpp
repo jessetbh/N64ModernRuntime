@@ -812,6 +812,53 @@ namespace recomp::packages {
         return result;
     }
 
+    bool looks_like_package(const fs::path &path) {
+        try {
+            std::error_code ec;
+            if (fs::is_directory(path, ec)) {
+                return package_root(path).has_value();
+            }
+            if (!fs::is_regular_file(path, ec) || lower(u8str(path.extension())) != ".zip") {
+                return false;
+            }
+            FILE *zf = open_file(path, L"rb", "rb");
+            if (!zf) {
+                return false;
+            }
+            mz_zip_archive archive{};
+            bool found = false;
+            if (mz_zip_reader_init_cfile(&archive, zf, 0, 0)) {
+                std::vector<std::string> tops;
+                bool root_manifest = false, nested_manifest = false;
+                const mz_uint count = mz_zip_reader_get_num_files(&archive);
+                for (mz_uint i = 0; i < count; i++) {
+                    mz_zip_archive_file_stat st;
+                    if (!mz_zip_reader_file_stat(&archive, i, &st)) {
+                        continue;
+                    }
+                    std::string name = st.m_filename;
+                    std::replace(name.begin(), name.end(), '\\', '/');
+                    const std::string top = name.substr(0, name.find('/'));
+                    if (ignorable(top)) {
+                        continue;
+                    }
+                    if (std::find(tops.begin(), tops.end(), top) == tops.end()) {
+                        tops.push_back(top);
+                    }
+                    root_manifest |= name == ManifestFile;
+                    nested_manifest |= name == top + "/" + ManifestFile;
+                }
+                found = root_manifest || (nested_manifest && tops.size() == 1);
+                mz_zip_reader_end(&archive);
+            }
+            std::fclose(zf);
+            return found;
+        }
+        catch (const std::exception &) {
+            return false;
+        }
+    }
+
     std::vector<InstallResult> process_import_folder(const fs::path &data_dir, const InstallOptions &options_in) {
         std::vector<InstallResult> results;
         try {

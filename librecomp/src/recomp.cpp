@@ -840,6 +840,30 @@ std::vector<recomp::mods::ModDetails> recomp::mods::get_all_mod_details(const st
     return mod_context->get_all_mod_details(mod_game_id);
 }
 
+std::unordered_map<std::string, recomp::mods::ModKindInfo> recomp::mods::get_mod_kinds() {
+    std::lock_guard lock { mod_context_mutex };
+    std::unordered_map<std::string, ModKindInfo> out;
+    for (const ModContext::OpenedModKind &m : mod_context->opened_mod_kinds(0, mod_context->num_opened_mods())) {
+        out[m.id] = { m.code, m.rom_patch };
+    }
+    return out;
+}
+
+recomp::packages::InstallResult recomp::packages::install_package(const std::filesystem::path &package) {
+    recomp::packages::InstallOptions options;
+    if (game_roms.size() == 1) {
+        const recomp::GameEntry &game = game_roms.begin()->second;
+        options.game_id = game.mod_game_id;
+        options.rom_sha1 = sha1_file(config_path / game.stored_filename()).value_or(std::string());
+    }
+    const recomp::Version &version = recomp::get_project_version();
+    if (version.major >= 0) {
+        options.recomp_version = std::to_string(version.major) + "." + std::to_string(version.minor) + "." + std::to_string(version.patch);
+    }
+    options.source = "launcher";   // installed from inside the game: the same rules as the launcher's
+    return install(package, config_path, options);
+}
+
 size_t recomp::mods::game_mode_count(const std::string& mod_game_id, bool include_disabled) {
     std::lock_guard lock { mod_context_mutex };
     return mod_context->game_mode_count(mod_game_id, include_disabled);

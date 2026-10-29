@@ -279,6 +279,12 @@ namespace recomp {
         // for the Mods menu. Does nothing (and creates nothing) without an import folder.
         constexpr const char *ImportFolder = "import";
         std::vector<InstallResult> process_import_folder(const std::filesystem::path &data_dir, const InstallOptions &options);
+        // Whether a dropped file or folder is a package (aki-package.json at its root or in its only top-level folder;
+        // for a .zip, judged from its entry names). Anything else goes to the legacy mod installer.
+        bool looks_like_package(const std::filesystem::path &path);
+        // Installs a package into this game's data folder with this game's options (its mod game id, the stored ROM's
+        // SHA-1, the build version): the Mods menu's Install. Single-game ports only (otherwise refused).
+        InstallResult install_package(const std::filesystem::path &package);
 
         // ---- Migration (aki-roadmap#154 step 3): the first start with the package registry ----
 

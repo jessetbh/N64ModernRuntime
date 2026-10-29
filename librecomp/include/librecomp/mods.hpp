@@ -687,6 +687,13 @@ namespace recomp {
         };
         void register_entry_prologues(std::span<const EntryPrologue> prologues);
         std::vector<ModDetails> get_all_mod_details(const std::string& mod_game_id);
+        // [wcw] aki-roadmap#154: what each opened mod carries (the Mods menu's kind tabs): code, a ROM patch, or
+        // neither (a data pack). Keyed by mod id.
+        struct ModKindInfo {
+            bool code = false;
+            bool rom_patch = false;
+        };
+        std::unordered_map<std::string, ModKindInfo> get_mod_kinds();
         size_t game_mode_count(const std::string& mod_game_id, bool include_disabled);
         recomp::Version get_mod_version(size_t mod_index);
         std::string get_mod_id(size_t mod_index);
