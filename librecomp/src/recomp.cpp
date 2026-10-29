@@ -25,6 +25,7 @@
 #include "librecomp/addresses.hpp"
 #include "librecomp/mods.hpp"
 #include "librecomp/conversion.hpp"
+#include "librecomp/packages.hpp"
 #include "librecomp/save_backups.hpp"
 #include "librecomp/startup_shutdown.hpp"
 #include "recompiler/live_recompiler.h"
@@ -150,6 +151,29 @@ namespace recomp::mods {
 }
 
 void recomp::mods::scan_mods() {
+    // [wcw] aki-roadmap#154: finish or undo an install a crash interrupted, then install the packages dropped in
+    // <data>/import, before the mod folder is scanned so they load in this session. Once per run: the Mods menu
+    // scans again mid-session, when files the first scan opened could block a swap. Only a port with one game knows
+    // which game a package must be for.
+    static bool packages_imported = false;
+    if (!packages_imported && game_roms.size() == 1) {
+        packages_imported = true;
+        if (const std::string recovered = recomp::packages::recover_interrupted_install(config_path); !recovered.empty()) {
+            printf("[wcw] packages: %s\n", recovered.c_str());
+        }
+        std::error_code ec;
+        if (std::filesystem::is_directory(config_path / recomp::packages::ImportFolder, ec)) {
+            const recomp::GameEntry &game = game_roms.begin()->second;
+            recomp::packages::InstallOptions options;
+            options.game_id = game.mod_game_id;
+            options.rom_sha1 = recomp::packages::sha1_file(config_path / game.stored_filename()).value_or(std::string());
+            const recomp::Version &version = recomp::get_project_version();
+            if (version.major >= 0) {
+                options.recomp_version = std::to_string(version.major) + "." + std::to_string(version.minor) + "." + std::to_string(version.patch);
+            }
+            recomp::packages::process_import_folder(config_path, options);
+        }
+    }
     std::vector<recomp::mods::ModOpenErrorDetails> mod_open_errors;
     // [wcw fullconv] AKI_CONVERSION=<id>: also open the conversion's own mods (its patch, its texture pack).
     const std::vector<std::filesystem::path> conversion_folders = load_active_conversion(config_path);

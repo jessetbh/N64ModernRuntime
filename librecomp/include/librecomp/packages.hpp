@@ -161,11 +161,124 @@ namespace recomp {
         // something in it can't be read.
         std::optional<uint64_t> hash_path(const std::filesystem::path &path, size_t chunk_size = size_t(1) << 20);
 
+        // The SHA-1 of a file (lower-case hex), streamed; nullopt when it can't be read. For base_rom checks.
+        std::optional<std::string> sha1_file(const std::filesystem::path &path);
+
         // <data>/packages.json; an absent file is an empty registry (Ok).
         RegistryStatus load_registry(const std::filesystem::path &data_dir, Registry &out);
         // Writes <data>/packages.json through a temporary file (flushed to disk) and a rename, retried briefly while
         // another program holds the file open, so a crash never leaves half a file. Check may_save first.
         bool save_registry(const std::filesystem::path &data_dir, const Registry &registry);
+
+        // ---- Installing, upgrading, removing, the drop folder (aki-roadmap#154 step 2) ----
+
+        struct InstallOptions {
+            std::string game_id;            // this port's mod game id: a package for another game is refused
+            std::string rom_sha1;           // the player's ROM, lower-case hex ("" = unknown: a conversion naming a
+                                            // base_rom is then refused, anything else only warns)
+            std::string recomp_version;     // this build, for requires.minimum_recomp_version ("" = not checked)
+            std::string source = "launcher";// recorded in the registry: launcher / dropped / bundled / migrated
+            bool reinstall = false;         // the same version is installed: install it again
+            bool allow_downgrade = false;   // a newer version is installed: install this older one anyway
+            std::string date;               // YYYYMMDD for .edited-<date> copies ("" = today, local time)
+            std::string now;                // the install time, UTC ISO 8601 ("" = now)
+        };
+
+        // Where each payload part goes, relative to the data folder: an addon's .nrm and a texture pack's .rtz go to
+        // mods/<file name>, a loose texture pack folder to mods/<id>, model packs to mods/models/<pack folder> and
+        // their HD packs to mods/<file name>, a conversion folder to conversions/<id> and its texture packs to
+        // mods/<file name>.
+        struct Placement {
+            std::string from;   // relative to the package root (normal_path)
+            std::string to;     // relative to the data folder
+            bool folder = false;
+        };
+        std::vector<Placement> placements(const Manifest &manifest);
+
+        enum class Action {
+            Install,            // not installed yet
+            Upgrade,            // an older version is installed
+            Reinstall,          // the same version, and InstallOptions::reinstall
+            Downgrade,          // a newer version, and InstallOptions::allow_downgrade
+            AlreadyInstalled,   // the same version: nothing to do
+            Refuse              // reason says why; nothing is touched
+        };
+        struct Plan {
+            Action action = Action::Refuse;
+            std::string reason;                     // for Refuse (and AlreadyInstalled / a refused downgrade)
+            std::vector<Problem> notes;             // warnings to show: a ROM mismatch on a non-conversion, a missing
+                                                    // required package, "for your own use" permission
+            std::vector<Placement> places;
+            std::string old_version;                // the installed version, for Upgrade / Reinstall / Downgrade
+            std::vector<std::string> replaced;      // installed packages named in "replaces", removed with the install
+        };
+        // The install rules, pure (the registry as loaded, the parsed manifest):
+        // - the package must be for this game, and this build must be at least requires.minimum_recomp_version;
+        // - base_rom: a conversion for another ROM (or when the player's ROM isn't known) is refused, anything else
+        //   only warns;
+        // - no two parts may land on the same path (or one inside another);
+        // - its id and paths must not belong to another package (conflict(), the replaced ones excepted);
+        // - an installed copy decides upgrade / reinstall / downgrade / already installed by version.
+        Plan plan_install(const Registry &registry, const Manifest &manifest, const InstallOptions &options);
+
+        // The name an edited or hand-placed file is kept under when a package takes its place: <path>.edited-<date>,
+        // then <path>.edited-<date>-2, -3, ... while taken(name) says that one exists. install() puts kept copies
+        // under KeptFolder (kept/<path>.edited-<date>), where no mod, texture or conversion scan sees them.
+        constexpr const char *KeptFolder = "kept";
+        template <typename Taken>
+        std::string edited_name(const std::string &path, const std::string &date, Taken taken) {
+            const std::string base = normal_path(path) + ".edited-" + date;
+            if (!taken(base)) {
+                return base;
+            }
+            for (int n = 2; n < 1000; n++) {
+                const std::string name = base + "-" + std::to_string(n);
+                if (!taken(name)) {
+                    return name;
+                }
+            }
+            return base + "-x";
+        }
+
+        enum class Outcome { Installed, Upgraded, Reinstalled, Downgraded, AlreadyInstalled, Refused, Failed };
+        const char *outcome_name(Outcome outcome);
+        struct InstallResult {
+            Outcome outcome = Outcome::Failed;
+            std::string id, display_name, version, old_version;
+            Kind kind = Kind::Addon;
+            std::vector<std::string> kept;          // player copies kept aside (.edited-<date>) or left in place
+            std::vector<Problem> problems;          // manifest problems and plan notes
+            std::string message;                    // one line for the player
+        };
+        // Installs a package (a folder or a .zip holding aki-package.json at its root, or inside its only top-level
+        // folder; a __MACOSX folder or .DS_Store beside it is ignored) into the data folder by the rules above. A zip
+        // must use UTF-8 names (old zips in a local code page are refused, not misread) and unpack to at most 16 GiB
+        // with room to spare; a package may not contain symlinks. Every part is staged first and swapped in after;
+        // a failure puts back what was there, and a journal (.aki-work/install-journal.json) lets the next start
+        // finish or undo an install a crash interrupted. Upgrades replace unedited files, keep edited and
+        // hand-placed ones under kept/ (<path>.edited-<date>), and drop the old version's unedited files the new one
+        // no longer has. Never touches saves. Never throws.
+        InstallResult install(const std::filesystem::path &package, const std::filesystem::path &data_dir, const InstallOptions &options);
+
+        // Finishes or undoes an install a crash interrupted (from its journal). install() and the drop folder call it
+        // first; a game calls it at start. Returns a line for the log, or "" when there was nothing to do.
+        std::string recover_interrupted_install(const std::filesystem::path &data_dir);
+
+        struct RemoveResult {
+            bool removed = false;
+            std::vector<std::string> kept;          // edited files left in place (now the player's own)
+            std::string message;
+        };
+        // Removes an installed package: its unedited files and its registry entry. Edited files stay where they are;
+        // saves are never touched.
+        RemoveResult uninstall(const std::string &id, const std::filesystem::path &data_dir);
+
+        // The drop folder: packages (folders or .zip) put in <data>/import install at the next start, with source
+        // "dropped". Installed or already-installed ones are removed from import; refused or failed ones move to
+        // import/not-installed with a <name>.txt saying why. The results of the last run go to import/last-import.json
+        // for the Mods menu. Does nothing (and creates nothing) without an import folder.
+        constexpr const char *ImportFolder = "import";
+        std::vector<InstallResult> process_import_folder(const std::filesystem::path &data_dir, const InstallOptions &options);
     }
 }
 
