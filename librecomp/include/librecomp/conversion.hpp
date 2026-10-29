@@ -76,11 +76,13 @@ namespace recomp {
             // A mod from the player's mods folder, as a session sees it.
             struct PlayerMod {
                 std::string id;
-                bool code = false;              // a code add-on (or a ROM patch); false: a data pack (texture pack)
+                bool code = false;              // a code add-on; false (and not a ROM patch): a data pack (texture pack)
+                bool rom_patch = false;         // another ROM hack's patch: never beside the conversion's own
                 bool enabled = false;           // enabled in the player's mod configuration
             };
             // conversions/<id>/addons.json: {"enabled": [ids], "disabled": [ids]}. The player's word wins over the
-            // conversion's: enabled runs even a code add-on the conversion doesn't list, disabled turns one off.
+            // conversion's: enabled runs even a code add-on the conversion doesn't list, disabled turns one off (an id
+            // in both lists is off). It can't turn off the conversion's own mods or turn on another ROM hack.
             struct PlayerAddons {
                 std::vector<std::string> enabled, disabled;
             };
@@ -88,7 +90,10 @@ namespace recomp {
             // The session rule with add-ons (aki-roadmap#154 step 4): the conversion's own mods and the cheats engine
             // (as above), plus each of the player's mods that the player overrides on, or that the player has
             // enabled and the conversion allows: data packs unless addons.allow is none, code add-ons when
-            // addons.allow is all or the conversion lists them. why (optional) gets one line per player mod.
+            // addons.allow is all or the conversion lists them. Never: another ROM hack's patch (two patches can't
+            // load together), and the cheats engine without runnable conversion codes unless the player turned it
+            // on here (the player's stock-game codes would poke a hack's memory). why (optional) gets one line per
+            // player mod. A mod enabled here can still pull in its dependencies when it loads (dependency auto-enable).
             std::unordered_set<std::string> session_enabled_mods(const std::vector<std::string> &conversion_mod_ids,
                 bool codes_runnable, const std::string &cheats_mod_id, const std::vector<PlayerMod> &player_mods,
                 const Conversion &conversion, const PlayerAddons &player, std::vector<std::string> *why = nullptr);

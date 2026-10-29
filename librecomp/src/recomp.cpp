@@ -216,12 +216,12 @@ void recomp::mods::scan_mods() {
     // [wcw fullconv] AKI_CONVERSION=<id>: also open the conversion's own mods (its patch, its texture pack).
     const std::vector<std::filesystem::path> conversion_folders = load_active_conversion(config_path);
     std::vector<std::string> conversion_mod_ids;
-    std::vector<std::pair<std::string, bool>> stock_mods;
+    std::vector<ModContext::OpenedModKind> stock_mods;
     {
         std::lock_guard mod_lock{ mod_context_mutex };
         mod_open_errors = mod_context->scan_mod_folder(config_path / mods_directory);
         const size_t stock_mod_count = mod_context->num_opened_mods();
-        stock_mods = mod_context->opened_mod_code_flags(0, stock_mod_count);
+        stock_mods = mod_context->opened_mod_kinds(0, stock_mod_count);
         for (const std::filesystem::path &folder : conversion_folders) {
             for (auto &error : mod_context->scan_mod_folder(folder, false)) {
                 mod_open_errors.emplace_back(std::move(error));
@@ -240,8 +240,8 @@ void recomp::mods::scan_mods() {
         // (conversions/<id>/addons.json; aki-roadmap#154). Nothing is saved to mods.json.
         const conversion::Conversion *active = active_conversion();
         std::vector<conversion::PlayerMod> player_mods;
-        for (const auto &[id, code] : stock_mods) {
-            player_mods.push_back({ id, code, mod_context->is_mod_enabled(id) });
+        for (const ModContext::OpenedModKind &m : stock_mods) {
+            player_mods.push_back({ m.id, m.code, m.rom_patch, mod_context->is_mod_enabled(m.id) });
         }
         conversion::PlayerAddons player;
         conversion::Conversion fallback;

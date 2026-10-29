@@ -169,7 +169,10 @@ namespace recomp::mods::conversion {
             }
             bool on = false;
             const char *reason;
-            if (listed(player.disabled, m.id)) {
+            if (m.rom_patch) {
+                reason = "another ROM hack: only the conversion's own patch runs";
+            }
+            else if (listed(player.disabled, m.id)) {
                 reason = "you turned it off for this conversion";
             }
             else if (listed(player.enabled, m.id)) {
@@ -181,6 +184,9 @@ namespace recomp::mods::conversion {
             }
             else if (conversion.addons_allow == AddonsAllow::None) {
                 reason = "this conversion runs no add-ons";
+            }
+            else if (m.id == cheats_mod_id) {
+                reason = "cheats engine: the conversion has no codes for it (turn it on for this conversion to use your own)";
             }
             else if (!m.code) {
                 on = true;

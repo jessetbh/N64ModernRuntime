@@ -286,11 +286,11 @@ TEST_CASE("conversion: player addons.json parses; bad input is empty") {
 
 TEST_CASE("conversion: session add-ons follow the conversion's policy and the player's word") {
     const std::vector<PlayerMod> mods = {
-        { "hd_textures", false, true },     // data pack, enabled
-        { "off_textures", false, false },   // data pack, not enabled
-        { "aki_camera", true, true },       // code, enabled
-        { "aki_modelimport", true, true },  // code, enabled
-        { "aki_cheats", true, true },       // the cheats engine
+        { "hd_textures", false, false, true },      // data pack, enabled
+        { "off_textures", false, false, false },    // data pack, not enabled
+        { "aki_camera", true, false, true },        // code, enabled
+        { "aki_modelimport", true, false, true },   // code, enabled
+        { "aki_cheats", true, false, true },        // the cheats engine
     };
     Conversion c;   // default: data
     std::vector<std::string> why;
@@ -322,4 +322,28 @@ TEST_CASE("conversion: session add-ons follow the conversion's policy and the pl
     CHECK(!on.contains("hd_textures"));
     CHECK(!on.contains("aki_modelimport"));     // allow none
     CHECK(on.contains("hack_patch"));           // the conversion's own always run
+}
+
+TEST_CASE("conversion: another hack's patch never joins; the cheats engine needs the conversion's codes") {
+    const std::vector<PlayerMod> mods = {
+        { "other_hack", false, true, true },        // another ROM hack's patch, enabled
+        { "aki_cheats", true, false, true },        // the cheats engine, enabled
+        { "both", true, false, true },              // in both of the player's lists
+    };
+    Conversion c;
+    c.addons_allow = AddonsAllow::All;
+    auto on = session_enabled_mods({ "hack_patch" }, false, "aki_cheats", mods, c, {});
+    CHECK(!on.contains("other_hack"));           // even under "all"
+    CHECK(!on.contains("aki_cheats"));           // no runnable codes: the stock list would poke the hack
+    CHECK(on.contains("both"));
+    PlayerAddons player;
+    player.enabled = { "other_hack", "aki_cheats", "both", "hack_patch" };
+    player.disabled = { "both", "hack_patch" };
+    on = session_enabled_mods({ "hack_patch" }, false, "aki_cheats", mods, c, player);
+    CHECK(!on.contains("other_hack"));           // not even when the player asks
+    CHECK(on.contains("aki_cheats"));            // the player's own choice
+    CHECK(!on.contains("both"));                 // disabled wins
+    CHECK(on.contains("hack_patch"));            // the conversion's own can't be turned off
+    on = session_enabled_mods({ "hack_patch" }, true, "aki_cheats", mods, c, {});
+    CHECK(on.contains("aki_cheats"));            // runnable codes
 }
