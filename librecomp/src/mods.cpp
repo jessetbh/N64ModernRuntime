@@ -13,6 +13,7 @@
 #include "librecomp/mod_enable_rules.hpp"
 #include "librecomp/conversion.hpp"
 #include "librecomp/entry_prologue_rules.hpp"
+#include "librecomp/regen_rules.hpp"
 #include "librecomp/overlays.hpp"
 #include "librecomp/game.hpp"
 #include "librecomp/patcher.hpp"
@@ -1498,8 +1499,17 @@ N64Recomp::Context context_from_regenerated_list(const RegeneratedList& regenlis
             function_out.function_hooks.clear();
 
             // Copy the function's words.
+            // [wcw fullconv] A span that ends on a jump or branch takes in its delay slot, the next word (a hack's
+            // code can end a stock function's span there; regen_rules, aki-roadmap#76).
+            size_t num_words = function_in.size / sizeof(uint32_t);
+            if (num_words != 0) {
+                const uint8_t* last = rom.data() + function_out.rom + (num_words - 1) * sizeof(uint32_t);
+                const uint32_t last_instr = (uint32_t(last[0]) << 24) | (uint32_t(last[1]) << 16) | (uint32_t(last[2]) << 8) | uint32_t(last[3]);
+                const size_t end = function_out.rom + num_words * sizeof(uint32_t);
+                num_words = recomp::mods::regen_rules::words_to_decode(num_words, last_instr, rom.size() >= end + sizeof(uint32_t) ? 1 : 0);
+            }
             const uint32_t* func_words = reinterpret_cast<const uint32_t*>(rom.data() + function_out.rom);
-            function_out.words.assign(func_words, func_words + function_in.size / sizeof(uint32_t));
+            function_out.words.assign(func_words, func_words + num_words);
             
             // Add the function to the lookup table.
             ret.functions_by_vram[function_out.vram].push_back(function_index);
