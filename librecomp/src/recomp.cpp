@@ -16,6 +16,7 @@
 #include <charconv>
 
 #include "recomp.h"
+#include "librecomp/dd_breadcrumb.hpp"
 #include "librecomp/overlays.hpp"
 #include "librecomp/game.hpp"
 #include "xxHash/xxh3.h"
@@ -477,12 +478,23 @@ extern "C" gpr cop0_status_read(recomp_context* ctx) {
 
 extern "C" void switch_error(const char* func, uint32_t vram, uint32_t jtbl) {
     printf("Switch-case out of bounds in %s at 0x%08X for jump table at 0x%08X\n", func, vram, jtbl);
+    {
+        // [wcw] The last event to the local Datadog Agent (WCW_DD_METRICS, aki-roadmap#125).
+        char text[160];
+        snprintf(text, sizeof(text), "in %s at 0x%08X, jump table 0x%08X; the game exits", func, vram, jtbl);
+        recomp::dd::fatal("switch-case out of bounds", text);
+    }
     assert(false);
     exit(EXIT_FAILURE);
 }
 
 extern "C" void do_break(uint32_t vram) {
     printf("Encountered break at original vram 0x%08X\n", vram);
+    {
+        char text[96];
+        snprintf(text, sizeof(text), "at original vram 0x%08X; the game exits", vram);
+        recomp::dd::fatal("break", text);
+    }
     assert(false);
     exit(EXIT_FAILURE);
 }
