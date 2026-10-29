@@ -25,6 +25,7 @@
 #include "librecomp/addresses.hpp"
 #include "librecomp/mods.hpp"
 #include "librecomp/conversion.hpp"
+#include "librecomp/packages.hpp"
 #include "librecomp/save_backups.hpp"
 #include "librecomp/startup_shutdown.hpp"
 #include "recompiler/live_recompiler.h"
@@ -150,6 +151,17 @@ namespace recomp::mods {
 }
 
 void recomp::mods::scan_mods() {
+    // [wcw] aki-roadmap#154: packages dropped in <data>/import install before the mod folder is scanned, so they
+    // load in this session. Only a port with one game knows which game a package must be for.
+    if (game_roms.size() == 1) {
+        recomp::packages::InstallOptions options;
+        options.game_id = game_roms.begin()->second.mod_game_id;
+        const recomp::Version &version = recomp::get_project_version();
+        if (version.major >= 0) {
+            options.recomp_version = std::to_string(version.major) + "." + std::to_string(version.minor) + "." + std::to_string(version.patch);
+        }
+        recomp::packages::process_import_folder(config_path, options);
+    }
     std::vector<recomp::mods::ModOpenErrorDetails> mod_open_errors;
     // [wcw fullconv] AKI_CONVERSION=<id>: also open the conversion's own mods (its patch, its texture pack).
     const std::vector<std::filesystem::path> conversion_folders = load_active_conversion(config_path);

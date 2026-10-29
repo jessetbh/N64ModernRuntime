@@ -37,7 +37,8 @@ namespace recomp::packages {
         // Windows device names, matched on the stem before the first '.' ("nul.txt" and "aux.tar.gz" are devices too).
         bool is_device_name(const std::string &part) {
             const std::string stem = lower(part.substr(0, part.find('.')));
-            if (stem == "con" || stem == "prn" || stem == "aux" || stem == "nul") {
+            if (stem == "con" || stem == "prn" || stem == "aux" || stem == "nul" || stem == "conin$" || stem == "conout$" ||
+                stem == "clock$") {
                 return true;
             }
             return stem.size() == 4 && (stem.compare(0, 3, "com") == 0 || stem.compare(0, 3, "lpt") == 0) &&
@@ -589,7 +590,8 @@ namespace recomp::packages {
             for (const InstalledFile &f : e.files) {
                 files.push_back({ { "path", normal_path(f.path) }, { "hash", recomp::mods::bundled_packs::hash_hex(f.hash) } });
             }
-            const std::string kind = (e.kind == Kind::Unknown) ? e.kind_text : std::string(kind_name(e.kind));
+            const std::string kind = (e.kind != Kind::Unknown) ? std::string(kind_name(e.kind)) :
+                (e.kind_text.empty() ? std::string("unknown") : e.kind_text);
             json p = { { "id", e.id }, { "kind", kind }, { "version", e.version }, { "display_name", e.display_name },
                        { "source", e.source }, { "installed", e.installed } };
             if (!e.parent.empty()) {
@@ -689,5 +691,128 @@ namespace recomp::packages {
 
     uint64_t hash_bytes(const std::string &file_name, const std::string &data) {
         return recomp::mods::bundled_packs::pack_hash({ { file_name, data } });
+    }
+
+    // ---- Installing (aki-roadmap#154 step 2): the pure parts ----
+
+    std::vector<Placement> placements(const Manifest &m) {
+        auto base = [](const std::string &p) {
+            const std::string n = normal_path(p);
+            const size_t slash = n.find_last_of('/');
+            return (slash == std::string::npos) ? n : n.substr(slash + 1);
+        };
+        std::vector<Placement> out;
+        switch (m.kind) {
+            case Kind::Addon:
+                out.push_back({ normal_path(m.nrm), "mods/" + base(m.nrm), false });
+                break;
+            case Kind::TexturePack:
+                if (!m.rtz.empty()) {
+                    out.push_back({ normal_path(m.rtz), "mods/" + base(m.rtz), false });
+                }
+                else {
+                    out.push_back({ normal_path(m.folder), "mods/" + m.id, true });
+                }
+                break;
+            case Kind::ModelPack:
+                for (const std::string &p : m.packs) {
+                    out.push_back({ normal_path(p), "mods/models/" + base(p), true });
+                }
+                for (const std::string &p : m.hd) {
+                    out.push_back({ normal_path(p), "mods/" + base(p), false });
+                }
+                break;
+            case Kind::Conversion:
+                out.push_back({ normal_path(m.folder), "conversions/" + m.id, true });
+                for (const std::string &p : m.addons) {
+                    out.push_back({ normal_path(p), "mods/" + base(p), false });
+                }
+                break;
+            case Kind::Unknown:
+                break;
+        }
+        return out;
+    }
+
+    Plan plan_install(const Registry &registry, const Manifest &m, const InstallOptions &options) {
+        Plan plan;
+        plan.places = placements(m);
+        auto refuse = [&](const std::string &why) {
+            plan.action = Action::Refuse;
+            plan.reason = why;
+            return plan;
+        };
+        if (m.game_id != options.game_id) {
+            const std::string key = key_for_game_id(m.game_id);
+            return refuse("it's for another game (" + (key.empty() ? m.game_id : key) + ")");
+        }
+        if (!options.recomp_version.empty() && !m.requires_recomp.empty() &&
+            compare_versions(options.recomp_version, m.requires_recomp) < 0) {
+            return refuse("it needs game build " + m.requires_recomp + " or newer (this is " + options.recomp_version + ")");
+        }
+        if (!options.rom_sha1.empty() && !m.base_rom_sha1.empty() &&
+            std::find(m.base_rom_sha1.begin(), m.base_rom_sha1.end(), lower(options.rom_sha1)) == m.base_rom_sha1.end()) {
+            const std::string rom = m.base_rom_name.empty() ? std::string("a different ROM") : m.base_rom_name;
+            if (m.kind == Kind::Conversion) {
+                return refuse("it needs " + rom + "; your ROM is a different one");
+            }
+            plan.notes.push_back({ false, "base_rom", "made for " + rom + "; it may not work with your ROM" });
+        }
+        if (m.permission.redistribute == "no") {
+            plan.notes.push_back({ false, "permission", "for your own use: the authors don't allow sharing it" });
+        }
+        for (const std::string &dep : m.requires_packages) {
+            if (!find(registry, dep)) {
+                plan.notes.push_back({ false, "requires.packages", "it needs \"" + dep + "\", which isn't installed" });
+            }
+        }
+        for (const std::string &r : m.replaces) {
+            if (find(registry, r)) {
+                plan.replaced.push_back(r);
+            }
+        }
+        std::vector<std::string> tos;
+        for (const Placement &p : plan.places) {
+            tos.push_back(p.to);
+        }
+        if (const std::string why = conflict(registry, m.id, m.kind, tos, plan.replaced); !why.empty()) {
+            return refuse(why);
+        }
+        const Entry *old = find(registry, m.id);
+        if (!old) {
+            plan.action = Action::Install;
+            return plan;
+        }
+        plan.old_version = old->version;
+        const int c = compare_versions(m.version, old->version);
+        if (c > 0) {
+            plan.action = Action::Upgrade;
+        }
+        else if (c == 0) {
+            plan.action = options.reinstall ? Action::Reinstall : Action::AlreadyInstalled;
+            if (!options.reinstall) {
+                plan.reason = "version " + m.version + " is already installed";
+            }
+        }
+        else if (options.allow_downgrade) {
+            plan.action = Action::Downgrade;
+        }
+        else {
+            return refuse("version " + old->version + " is installed, which is newer than " + m.version);
+        }
+        return plan;
+    }
+
+    const char *outcome_name(Outcome outcome) {
+        switch (outcome) {
+            case Outcome::Installed: return "installed";
+            case Outcome::Upgraded: return "upgraded";
+            case Outcome::Reinstalled: return "reinstalled";
+            case Outcome::Downgraded: return "downgraded";
+            case Outcome::AlreadyInstalled: return "already-installed";
+            case Outcome::Refused: return "refused";
+            case Outcome::Failed: return "failed";
+        }
+        return "failed";
     }
 }

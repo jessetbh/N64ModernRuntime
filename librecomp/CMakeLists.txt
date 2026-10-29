@@ -45,6 +45,7 @@ add_library(librecomp STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/bundled_packs_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/packages.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/packages_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/packages_install.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/save_backups.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/si.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/sp.cpp"
@@ -111,6 +112,8 @@ if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
         "${PROJECT_SOURCE_DIR}/tests/wcw/packages_tests.cpp"
         "${PROJECT_SOURCE_DIR}/src/packages_rules.cpp"
         "${PROJECT_SOURCE_DIR}/src/packages.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/packages_install_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/packages_install.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/entry_prologue_tests.cpp"
         "${PROJECT_SOURCE_DIR}/src/entry_prologue_rules.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/regen_rules_tests.cpp"
@@ -118,6 +121,7 @@ if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
     )
     target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/tests/wcw"
         "${PROJECT_SOURCE_DIR}/../ultramodern/include" "${PROJECT_SOURCE_DIR}/../thirdparty/concurrentqueue" "${PROJECT_SOURCE_DIR}/../thirdparty")
+    target_link_libraries(librecomp_wcw_tests PRIVATE miniz)
     set(LIBRECOMP_WCW_TESTS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/librecomp_wcw_tests.passed")
     add_custom_command(
         OUTPUT "${LIBRECOMP_WCW_TESTS_STAMP}"
