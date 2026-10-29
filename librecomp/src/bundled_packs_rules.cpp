@@ -8,11 +8,18 @@
 
 namespace recomp::mods::bundled_packs {
     static bool is_text_file(const std::string &path) {
-        const size_t dot = path.find_last_of('.');
-        if (dot == std::string::npos || path.find('/', dot) != std::string::npos) {
+        // The extension as Python's os.path.splitext sees it: leading dots of the file name don't start one.
+        const size_t slash = path.find_last_of('/');
+        std::string name = (slash == std::string::npos) ? path : path.substr(slash + 1);
+        const size_t first = name.find_first_not_of('.');
+        if (first == std::string::npos) {
             return false;
         }
-        std::string ext = path.substr(dot);
+        const size_t dot = name.find_last_of('.');
+        if (dot == std::string::npos || dot < first) {
+            return false;
+        }
+        std::string ext = name.substr(dot);
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
         return ext == ".json" || ext == ".md" || ext == ".txt";
     }

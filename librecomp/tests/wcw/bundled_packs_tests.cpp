@@ -7,15 +7,49 @@
 
 #include "librecomp/bundled_packs.hpp"
 
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
 #include "wcw_test.h"
 
 using namespace recomp::mods::bundled_packs;
+namespace fs = std::filesystem;
 
 namespace {
     const std::string BinBytes = std::string("\x00\x01\r\n", 4);
+
+    void write(const fs::path &p, const std::string &data) {
+        fs::create_directories(p.parent_path());
+        std::ofstream f(p, std::ios::binary | std::ios::trunc);
+        f << data;
+    }
+
+    std::string read(const fs::path &p) {
+        std::ifstream f(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    }
+
+    std::string pack_json(const char *name, const char *version) {
+        return std::string("{\n  \"id\": \"") + name + "\",\n  \"version\": \"" + version + "\"\n}\n";
+    }
+
+    // A fresh folder under the temp directory, removed when the test ends.
+    struct TempDir {
+        fs::path path;
+        TempDir() {
+            const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+            path = fs::temp_directory_path() / ("wcw_bundled_packs_" + std::to_string(stamp));
+            fs::create_directories(path);
+        }
+        ~TempDir() {
+            std::error_code ec;
+            fs::remove_all(path, ec);
+        }
+    };
 }
 
 TEST_CASE("bundled packs: the pack hash matches AkiMods pack_history.py (shared vector)") {
@@ -96,4 +130,69 @@ TEST_CASE("bundled packs: .bundled and bundled-history.json parse leniently") {
     CHECK(h.at("q-robot")[0] == 7);
     CHECK(parse_history("not json").empty());
     CHECK(parse_history("{}").empty());
+}
+
+TEST_CASE("bundled packs: dotfiles have no extension, as in pack_history.py (os.path.splitext)") {
+    // ".md" and "..json" aren't text files there, so their CR LF is data on both sides.
+    CHECK(pack_hash({ { "sub/.md", "a\r\n" } }) != pack_hash({ { "sub/.md", "a\n" } }));
+    CHECK(pack_hash({ { "..json", "a\r\n" } }) != pack_hash({ { "..json", "a\n" } }));
+    CHECK(pack_hash({ { "sub/notes.md", "a\r\n" } }) == pack_hash({ { "sub/notes.md", "a\n" } }));
+}
+
+TEST_CASE("bundled packs: install() on disk: update unedited, keep edited and own, skip deleted, recover an interrupted update") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "assets_models";
+    const fs::path dst = tmp.path / "mods_models";
+    auto old_files = [](const char *id) {
+        return std::vector<std::pair<std::string, std::string>>{ { "pack.json", pack_json(id, "1.0.0") }, { "model.bin", std::string("old-") + id } };
+    };
+    // The bundle: six packs at 1.1.0; a, b, c, d and f have an earlier 1.0.0 version.
+    std::string history = "{\"previous\": {";
+    for (const char *id : { "a", "b", "c", "d", "e", "f" }) {
+        write(src / (std::string(id) + ".akimodel") / "pack.json", pack_json(id, "1.1.0"));
+        write(src / (std::string(id) + ".akimodel") / "model.bin", std::string("new-") + id);
+        if (std::string(id) != "e") {
+            history += std::string(history.back() == '{' ? "" : ",") + "\"" + id + "\": [\"" + hash_hex(pack_hash(old_files(id))) + "\"]";
+        }
+    }
+    write(src / HistoryFile, history + "}}");
+    write(src / "CREDITS.md", "credits\n");
+    // The player: a unedited 1.0.0 (CRLF, as a Windows checkout gave it), b edited, c deleted, d their own pack of that
+    // name (not in .bundled), e never installed, f cut off mid-update (only f.akimodel.replaced is left).
+    write(dst / "a.akimodel" / "pack.json", "{\r\n  \"id\": \"a\",\r\n  \"version\": \"1.0.0\"\r\n}\r\n");
+    write(dst / "a.akimodel" / "model.bin", "old-a");
+    write(dst / "b.akimodel" / "pack.json", pack_json("b", "1.0.0"));
+    write(dst / "b.akimodel" / "model.bin", "old-b, edited");
+    write(dst / "d.akimodel" / "pack.json", pack_json("d", "0.1.0"));
+    write(dst / "d.akimodel" / "model.bin", "mine");
+    write(dst / "f.akimodel.replaced" / "pack.json", pack_json("f", "1.0.0"));
+    write(dst / "f.akimodel.replaced" / "model.bin", "old-f");
+    write(dst / RecordFile, "a.akimodel\nb.akimodel\nc.akimodel\nf.akimodel\n");
+
+    install(src, dst);
+    CHECK(read(dst / "a.akimodel" / "model.bin") == "new-a");                  // updated
+    CHECK(pack_version(read(dst / "a.akimodel" / "pack.json")) == "1.1.0");
+    CHECK(read(dst / "b.akimodel" / "model.bin") == "old-b, edited");          // edited: kept
+    CHECK(!fs::exists(dst / "c.akimodel"));                                    // deleted: stays deleted
+    CHECK(read(dst / "d.akimodel" / "model.bin") == "mine");                   // the player's own: kept
+    CHECK(read(dst / "e.akimodel" / "model.bin") == "new-e");                  // new: installed
+    CHECK(read(dst / "f.akimodel" / "model.bin") == "new-f");                  // recovered, then updated
+    CHECK(!fs::exists(dst / "f.akimodel.replaced"));
+    CHECK(!fs::exists(dst / "a.akimodel.installing") && !fs::exists(dst / "a.akimodel.replaced"));
+    CHECK(read(dst / "CREDITS.md") == "credits\n");
+    const auto record = parse_record(read(dst / RecordFile));
+    CHECK(record.size() == 6 && record.count("d.akimodel") && record.count("e.akimodel"));
+
+    // A second start changes nothing.
+    write(dst / "b.akimodel" / "note.txt", "player file");
+    install(src, dst);
+    CHECK(read(dst / "a.akimodel" / "model.bin") == "new-a");
+    CHECK(read(dst / "b.akimodel" / "note.txt") == "player file");
+    CHECK(!fs::exists(dst / "c.akimodel"));
+    // Without a history file nothing is replaced: a fresh bundle only installs.
+    fs::remove(src / HistoryFile);
+    write(dst / "a.akimodel" / "model.bin", "old-a");
+    write(dst / "a.akimodel" / "pack.json", pack_json("a", "1.0.0"));
+    install(src, dst);
+    CHECK(read(dst / "a.akimodel" / "model.bin") == "old-a");
 }

@@ -103,6 +103,7 @@ if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
         "${PROJECT_SOURCE_DIR}/src/conversion_rules.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/bundled_packs_tests.cpp"
         "${PROJECT_SOURCE_DIR}/src/bundled_packs_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/src/bundled_packs.cpp"
     )
     target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/tests/wcw"
         "${PROJECT_SOURCE_DIR}/../ultramodern/include" "${PROJECT_SOURCE_DIR}/../thirdparty/concurrentqueue" "${PROJECT_SOURCE_DIR}/../thirdparty")

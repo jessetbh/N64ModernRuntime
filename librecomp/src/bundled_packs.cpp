@@ -92,6 +92,16 @@ namespace recomp::mods::bundled_packs {
                 continue;
             }
 
+            // A replace cut short between its two renames leaves the copy under .replaced: put it back first, or the
+            // pack would count as deleted by the player.
+            fs::path replaced = target;
+            replaced += ".replaced";
+            if (!fs::exists(target, entry_ec) && fs::is_directory(replaced, entry_ec)) {
+                fs::rename(replaced, target, entry_ec);
+                fprintf(stderr, "[wcw] bundled model pack %s: restored from an interrupted update%s\n", name.c_str(),
+                    entry_ec ? " (failed)" : "");
+            }
+
             const uint64_t bundled_hash = pack_hash(read_pack(entry.path()));
             const std::string bundled_version = pack_version(read_file(entry.path() / "pack.json"));
             Installed installed;
