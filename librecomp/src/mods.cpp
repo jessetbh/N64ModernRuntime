@@ -12,6 +12,7 @@
 #include "librecomp/mod_folder_rules.hpp"
 #include "librecomp/mod_enable_rules.hpp"
 #include "librecomp/conversion.hpp"
+#include "librecomp/entry_prologue_rules.hpp"
 #include "librecomp/overlays.hpp"
 #include "librecomp/game.hpp"
 #include "librecomp/patcher.hpp"
@@ -28,6 +29,37 @@ static std::vector<std::array<uint32_t, 3>> relink_data_ranges{};
 // [wcw fullconv] Stock functions the hack turned into data (relink.json "data_functions": ROM offsets).
 // They're dead code now: keep the static function instead of recompiling the data.
 static std::unordered_set<uint32_t> relink_data_functions{};
+// [wcw fullconv] The port's entry prologues (register_entry_prologues, aki-roadmap#76): the prologue functions, and
+// each static function's index into them.
+static std::vector<recomp_func_t*> entry_prologue_funcs{};
+static std::unordered_map<const void*, size_t> entry_prologue_of{};
+
+void recomp::mods::register_entry_prologues(std::span<const EntryPrologue> prologues) {
+    entry_prologue_funcs.clear();
+    entry_prologue_of.clear();
+    for (const EntryPrologue& p : prologues) {
+        if (p.func == nullptr || p.prologue == nullptr || entry_prologue_of.contains(reinterpret_cast<const void*>(p.func))) {
+            continue;
+        }
+        entry_prologue_of.emplace(reinterpret_cast<const void*>(p.func), entry_prologue_funcs.size());
+        entry_prologue_funcs.push_back(p.prologue);
+    }
+}
+
+// [wcw fullconv] The live generator's entry/return hook call: a mod's hook slot, or a prologue (with or without a
+// mod's slot; the mod's hook runs first, as it would ahead of the static function's body).
+static void run_entry_hook(uint8_t* rdram, recomp_context* ctx, size_t hook_index) {
+    namespace ep = recomp::mods::entry_prologues;
+    const ep::Decoded d = ep::decode(hook_index);
+    if (d.has_slot) {
+        recomp::mods::run_hook(rdram, ctx, d.slot);
+    }
+    if (d.is_prologue && d.prologue < entry_prologue_funcs.size()) {
+        const recomp_context saved = *ctx;
+        entry_prologue_funcs[d.prologue](rdram, ctx);
+        *ctx = saved;
+    }
+}
 
 static bool read_json(std::ifstream input_file, nlohmann::json &json_out) {
     if (!input_file.good()) {
@@ -516,7 +548,7 @@ recomp::mods::LiveRecompilerCodeHandle::LiveRecompilerCodeHandle(
         .reference_section_addresses = inputs.reference_section_addresses,
         // Use the reference section addresses as the local section addresses if this is regenerated code so that jump tables work correctly.
         .local_section_addresses = regenerated ? inputs.reference_section_addresses : section_addresses.get(),
-        .run_hook = run_hook,
+        .run_hook = run_entry_hook, // [wcw fullconv] mod hook slots and the port's entry prologues
         .entry_func_hooks = std::move(entry_func_hooks),
         .return_func_hooks = std::move(return_func_hooks),
         .original_section_indices = std::move(original_section_indices)
@@ -2166,6 +2198,15 @@ std::unique_ptr<recomp::mods::LiveRecompilerCodeHandle> apply_regenlist(Regenera
 
     std::unique_ptr<LiveRecompilerCodeHandle> regenerated_code_handle{};
 
+    // [wcw fullconv] The port's entry prologues go with the static functions they belong to (aki-roadmap#76).
+    if (!entry_prologue_of.empty()) {
+        std::vector<const void*> replaced(regenlist.func_ptrs.begin(), regenlist.func_ptrs.end());
+        const size_t kept = entry_prologues::add_to_entry_hooks(replaced, entry_prologue_of, regenlist.entry_func_hooks);
+        if (kept != 0) {
+            fprintf(stderr, "[live recompiler] %zu regenerated function(s) keep the port's entry prologue\n", kept);
+        }
+    }
+
     // Generate the recompiler context.
     N64Recomp::Context hook_context = context_from_regenerated_list(regenlist, rom);
     hook_context.set_all_reference_sections_relocatable();
@@ -2392,7 +2433,7 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::regener
 {
     RegeneratedList regenlist{};
     size_t num_skipped = 0;
-    std::vector<uint32_t> repaired_changed{};
+    std::vector<std::pair<uint32_t, bool>> repaired_changed{}; // vram, keeps an entry prologue
     for (size_t section_index = 0; section_index < recomp::overlays::num_code_sections(); section_index++) {
         const SectionTableEntry& section = recomp::overlays::get_code_section(static_cast<uint16_t>(section_index));
         bool section_added = false;
@@ -2429,7 +2470,8 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::regener
 
             // Repaired offline by the port: recompiling it from the patch drops the repair.
             if (repaired_functions.contains(func.func)) {
-                repaired_changed.push_back(section.ram_addr + func.offset);
+                repaired_changed.emplace_back(section.ram_addr + func.offset,
+                    entry_prologue_of.contains(reinterpret_cast<const void*>(func.func)));
             }
 
             if (!section_added) {
@@ -2472,12 +2514,12 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::regener
 
     if (!repaired_changed.empty()) {
         std::string addresses{};
-        for (uint32_t addr : repaired_changed) {
+        for (const auto& [addr, keeps_prologue] : repaired_changed) {
             char text[16];
             snprintf(text, sizeof(text), "%s0x%08X", addresses.empty() ? "" : ", ", addr);
             addresses += text;
-            fprintf(stderr, "[romhack] %s: 0x%08X was repaired by the port offline; recompiling it from the patch drops that repair\n",
-                mod_id.c_str(), addr);
+            fprintf(stderr, "[romhack] %s: 0x%08X was repaired by the port offline; recompiling it from the patch drops that repair%s\n",
+                mod_id.c_str(), addr, keeps_prologue ? " (its entry prologue is kept)" : "");
         }
 
         if (repaired_function_policy == RepairedFunctionPolicy::Refuse) {
