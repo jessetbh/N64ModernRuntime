@@ -150,6 +150,29 @@ namespace recomp::mods {
     std::string active_conversion_cheats_mod();
 }
 
+// [wcw] The file names a game installs into mods/ from assets/mods next to its executable (install_bundled_mods).
+// Migration doesn't record them (aki-roadmap#154): the game rewrites them on update.
+static std::vector<std::string> bundled_mod_names() {
+    std::vector<std::string> names;
+    std::filesystem::path exe;
+#ifdef _WIN32
+    wchar_t buf[32768];
+    const DWORD n = GetModuleFileNameW(nullptr, buf, DWORD(std::size(buf)));
+    if (n > 0 && n < std::size(buf)) {
+        exe = std::filesystem::path(std::wstring(buf, n));
+    }
+#else
+    std::error_code exe_ec;
+    exe = std::filesystem::read_symlink("/proc/self/exe", exe_ec);
+#endif
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(exe.parent_path() / "assets" / "mods", ec), end; !exe.empty() && !ec && it != end; it.increment(ec)) {
+        const std::u8string name = it->path().filename().u8string();
+        names.emplace_back(name.begin(), name.end());
+    }
+    return names;
+}
+
 void recomp::mods::scan_mods() {
     // [wcw] aki-roadmap#154: finish or undo an install a crash interrupted, then install the packages dropped in
     // <data>/import, before the mod folder is scanned so they load in this session. Once per run: the Mods menu
@@ -162,11 +185,26 @@ void recomp::mods::scan_mods() {
             printf("[wcw] packages: %s\n", recovered.c_str());
         }
         std::error_code ec;
-        if (std::filesystem::is_directory(config_path / recomp::packages::ImportFolder, ec)) {
-            const recomp::GameEntry &game = game_roms.begin()->second;
+        const recomp::GameEntry &game = game_roms.begin()->second;
+        const bool migrate = !recomp::packages::migration_done(config_path) && !(std::getenv("AKI_MIGRATE") && std::string(std::getenv("AKI_MIGRATE")) == "0");
+        const bool do_import = std::filesystem::is_directory(config_path / recomp::packages::ImportFolder, ec);
+        const std::string rom_sha1 = (migrate || do_import) ?
+            recomp::packages::sha1_file(config_path / game.stored_filename()).value_or(std::string()) : std::string();
+        if (migrate) {
+            // The first start with the registry: patch-mod hacks become conversions, installed files get recorded
+            // (aki-roadmap#154 step 3; migration.log says what moved). AKI_MIGRATE=0 skips it for one start.
+            recomp::packages::MigrateOptions migrate_options;
+            migrate_options.game_id = game.mod_game_id;
+            migrate_options.rom_sha1 = rom_sha1;
+            migrate_options.bundled_names = bundled_mod_names();
+            for (const std::string &line : recomp::packages::migrate(config_path, migrate_options).lines) {
+                printf("[wcw] packages: %s\n", line.c_str());
+            }
+        }
+        if (do_import) {
             recomp::packages::InstallOptions options;
             options.game_id = game.mod_game_id;
-            options.rom_sha1 = recomp::packages::sha1_file(config_path / game.stored_filename()).value_or(std::string());
+            options.rom_sha1 = rom_sha1;
             const recomp::Version &version = recomp::get_project_version();
             if (version.major >= 0) {
                 options.recomp_version = std::to_string(version.major) + "." + std::to_string(version.minor) + "." + std::to_string(version.patch);
