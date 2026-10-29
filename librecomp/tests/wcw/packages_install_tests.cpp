@@ -448,3 +448,23 @@ TEST_CASE("install: a committed-by-token recovery deletes the old files; a lone 
     CHECK(!recover_interrupted_install(data).empty());
     CHECK(!fs::exists(data / ".aki-work"));
 }
+
+TEST_CASE("install: looks_like_package tells packages from legacy files") {
+    TempDir t;
+    const fs::path pkg = make_package(t.path / "pkg", manifest_json("addon", "cam", "1.0.0", "{\"nrm\": \"cam.nrm\"}"), { { "cam.nrm", "v1" } });
+    CHECK(looks_like_package(pkg));
+    write(t.path / "wrap" / "Inner" / ManifestFile, "{}");
+    CHECK(looks_like_package(t.path / "wrap"));            // its only top-level folder
+    const fs::path zip = t.path / "p.zip";
+    CHECK(make_zip(zip, { { "Pack/aki-package.json", "{}" }, { "Pack/cam.nrm", "x" }, { "__MACOSX/Pack/._cam.nrm", "j" } }));
+    CHECK(looks_like_package(zip));
+    const fs::path two = t.path / "two.zip";
+    CHECK(make_zip(two, { { "A/aki-package.json", "{}" }, { "B/x.nrm", "x" } }));
+    CHECK(!looks_like_package(two));                       // nested manifest, but two top-level folders
+    const fs::path legacy = t.path / "legacy.zip";
+    CHECK(make_zip(legacy, { { "mod.json", "{}" }, { "mod_binary.bin", "x" } }));
+    CHECK(!looks_like_package(legacy));
+    write(t.path / "cam.nrm", "x");
+    CHECK(!looks_like_package(t.path / "cam.nrm"));
+    CHECK(!looks_like_package(t.path / "missing"));
+}
