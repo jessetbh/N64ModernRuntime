@@ -25,6 +25,15 @@ namespace recomp {
             // The conversion picked in the game's Mods menu, for the next starts (aki-roadmap#57): one id in
             // <config>/conversions/active.txt. AKI_CONVERSION (the launcher) wins over it.
             constexpr const char *ChoiceFile = "active.txt";
+            // The player's own add-on choices for one conversion (aki-roadmap#154): conversions/<id>/addons.json.
+            constexpr const char *AddonsFile = "addons.json";
+
+            // Which of the player's add-ons a conversion lets run beside it (aki.json "addons", aki-roadmap#154).
+            enum class AddonsAllow {
+                None,   // only the conversion's own mods
+                Data,   // data packs the player has enabled (texture packs); code add-ons only when listed (default)
+                All     // everything the player has enabled
+            };
 
             struct Conversion {
                 std::string id;
@@ -46,6 +55,10 @@ namespace recomp {
                 std::string textures_naming;
                 std::string rt_lights_file;
                 std::string rt_materials_file;
+                // aki.json "addons": {"allow": "none" | "data" | "all", "mods": ["aki_camera", ...]}. Listed code add-ons
+                // run under "data" too (the conversion's allow-list).
+                AddonsAllow addons_allow = AddonsAllow::Data;
+                std::vector<std::string> addons_mods;
             };
 
             // [a-z0-9_.-]{1,48}, not starting with '.' or '_': ids are folder names (and '_packages' is reserved).
@@ -59,6 +72,26 @@ namespace recomp {
             // engine when it has codes that can run (codes_runnable). Every other mod is off for the session.
             std::unordered_set<std::string> session_enabled_mods(const std::vector<std::string> &conversion_mod_ids,
                 bool codes_runnable, const std::string &cheats_mod_id);
+
+            // A mod from the player's mods folder, as a session sees it.
+            struct PlayerMod {
+                std::string id;
+                bool code = false;              // a code add-on (or a ROM patch); false: a data pack (texture pack)
+                bool enabled = false;           // enabled in the player's mod configuration
+            };
+            // conversions/<id>/addons.json: {"enabled": [ids], "disabled": [ids]}. The player's word wins over the
+            // conversion's: enabled runs even a code add-on the conversion doesn't list, disabled turns one off.
+            struct PlayerAddons {
+                std::vector<std::string> enabled, disabled;
+            };
+            PlayerAddons parse_player_addons(const std::string &json_text);   // bad input: none
+            // The session rule with add-ons (aki-roadmap#154 step 4): the conversion's own mods and the cheats engine
+            // (as above), plus each of the player's mods that the player overrides on, or that the player has
+            // enabled and the conversion allows: data packs unless addons.allow is none, code add-ons when
+            // addons.allow is all or the conversion lists them. why (optional) gets one line per player mod.
+            std::unordered_set<std::string> session_enabled_mods(const std::vector<std::string> &conversion_mod_ids,
+                bool codes_runnable, const std::string &cheats_mod_id, const std::vector<PlayerMod> &player_mods,
+                const Conversion &conversion, const PlayerAddons &player, std::vector<std::string> *why = nullptr);
 
             // The save subfolder (saves/<subfolder>/): a conversion (AKI_CONVERSION, env_value) wins over the ROM-patch
             // mod's id; "" = the normal saves. Returns false for an invalid conversion id: the game must not start

@@ -1,5 +1,7 @@
 #include "librecomp/conversion.hpp"
 
+#include <algorithm>
+
 #include "json/json.hpp"
 
 namespace recomp::mods::conversion {
@@ -86,6 +88,19 @@ namespace recomp::mods::conversion {
             c.has_rt = !c.rt_lights_file.empty() || !c.rt_materials_file.empty();
         }
 
+        if (const auto addons = root.find("addons"); addons != root.end() && addons->is_object()) {
+            const auto allow = addons->find("allow");
+            const std::string a = (allow != addons->end() && allow->is_string()) ? allow->get<std::string>() : std::string();
+            c.addons_allow = (a == "none") ? AddonsAllow::None : (a == "all") ? AddonsAllow::All : AddonsAllow::Data;
+            if (const auto mods = addons->find("mods"); mods != addons->end() && mods->is_array()) {
+                for (const json &m : *mods) {
+                    if (m.is_string()) {
+                        c.addons_mods.push_back(m.get<std::string>());
+                    }
+                }
+            }
+        }
+
         // Paths stay inside the conversion folder.
         for (const std::string *path : { &c.codes_file, &c.textures_dir, &c.rt_lights_file, &c.rt_materials_file }) {
             if ((path->find("..") != std::string::npos) || (!path->empty() && ((path->front() == '/') || (path->front() == '\\') ||
@@ -112,6 +127,77 @@ namespace recomp::mods::conversion {
             enabled.emplace(cheats_mod_id);
         }
 
+        return enabled;
+    }
+
+    PlayerAddons parse_player_addons(const std::string &json_text) {
+        PlayerAddons out;
+        const nlohmann::json root = nlohmann::json::parse(json_text, nullptr, false);
+        if (root.is_discarded() || !root.is_object()) {
+            return out;
+        }
+        for (auto [key, list] : { std::pair{ "enabled", &out.enabled }, std::pair{ "disabled", &out.disabled } }) {
+            const auto it = root.find(key);
+            if (it == root.end() || !it->is_array()) {
+                continue;
+            }
+            for (const nlohmann::json &v : *it) {
+                if (v.is_string()) {
+                    list->push_back(v.get<std::string>());
+                }
+            }
+        }
+        return out;
+    }
+
+    std::unordered_set<std::string> session_enabled_mods(const std::vector<std::string> &conversion_mod_ids,
+        bool codes_runnable, const std::string &cheats_mod_id, const std::vector<PlayerMod> &player_mods,
+        const Conversion &conversion, const PlayerAddons &player, std::vector<std::string> *why)
+    {
+        std::unordered_set<std::string> enabled = session_enabled_mods(conversion_mod_ids, codes_runnable, cheats_mod_id);
+        auto listed = [](const std::vector<std::string> &list, const std::string &id) {
+            return std::find(list.begin(), list.end(), id) != list.end();
+        };
+        auto note = [&](const PlayerMod &m, bool on, const char *reason) {
+            if (why) {
+                why->push_back(m.id + ": " + (on ? "on" : "off") + " (" + reason + ")");
+            }
+        };
+        for (const PlayerMod &m : player_mods) {
+            if (enabled.contains(m.id)) {
+                continue;   // the conversion's own, or the cheats engine for its codes
+            }
+            bool on = false;
+            const char *reason;
+            if (listed(player.disabled, m.id)) {
+                reason = "you turned it off for this conversion";
+            }
+            else if (listed(player.enabled, m.id)) {
+                on = true;
+                reason = "you turned it on for this conversion";
+            }
+            else if (!m.enabled) {
+                reason = "not enabled";
+            }
+            else if (conversion.addons_allow == AddonsAllow::None) {
+                reason = "this conversion runs no add-ons";
+            }
+            else if (!m.code) {
+                on = true;
+                reason = "data pack";
+            }
+            else if (conversion.addons_allow == AddonsAllow::All || listed(conversion.addons_mods, m.id)) {
+                on = true;
+                reason = "code add-on this conversion allows";
+            }
+            else {
+                reason = "code add-on this conversion doesn't list";
+            }
+            if (on) {
+                enabled.insert(m.id);
+            }
+            note(m, on, reason);
+        }
         return enabled;
     }
 

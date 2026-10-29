@@ -348,6 +348,9 @@ namespace recomp {
             std::vector<ModOpenErrorDetails> scan_mod_folder(const std::filesystem::path& mod_folder, bool close_first = true);
             // [wcw fullconv] Ids of the opened mods from index first on (the ones a later scan added).
             std::vector<std::string> opened_mod_ids_from(size_t first);
+            // [wcw] aki-roadmap#154: the opened mods in [first, last) with whether each carries code (a code binary or a
+            // ROM patch); the rest are data packs.
+            std::vector<std::pair<std::string, bool>> opened_mod_code_flags(size_t first, size_t last);
             // [wcw fullconv] Enables exactly these mods for this session and stops writing mods.json until the next scan,
             // so a conversion's session never changes the player's normal mod setup.
             void apply_session_enabled_mods(const std::unordered_set<std::string>& session_mods);

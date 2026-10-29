@@ -1290,6 +1290,18 @@ std::vector<std::string> recomp::mods::ModContext::opened_mod_ids_from(size_t fi
     return ids;
 }
 
+std::vector<std::pair<std::string, bool>> recomp::mods::ModContext::opened_mod_code_flags(size_t first, size_t last) {
+    std::unique_lock lock(opened_mods_mutex);
+    std::vector<std::pair<std::string, bool>> out;
+    for (size_t i = first; i < last && i < opened_mods.size(); i++) {
+        const ModHandle &mod = opened_mods[i];
+        const bool code = std::find(mod.content_types.begin(), mod.content_types.end(), code_content_type_id) != mod.content_types.end() ||
+            (mod.manifest.file_handle && mod.manifest.file_handle->file_exists(std::string{ modpaths::rom_patch_path }));
+        out.emplace_back(mod.manifest.mod_id, code);
+    }
+    return out;
+}
+
 void recomp::mods::ModContext::apply_session_enabled_mods(const std::unordered_set<std::string>& session_mods) {
     session_only_config = true;
     std::vector<std::string> ids = opened_mod_ids_from(0);
