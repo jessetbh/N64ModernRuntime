@@ -67,13 +67,13 @@ namespace {
         return dir;
     }
 
-    bool make_zip(const fs::path &zip, const std::map<std::string, std::string> &entries) {
+    bool make_zip(const fs::path &zip, const std::map<std::string, std::string> &entries, mz_uint flags = 0) {
         mz_zip_archive a{};
         if (!mz_zip_writer_init_file(&a, zip.string().c_str(), 0)) {
             return false;
         }
         for (const auto &[name, data] : entries) {
-            mz_zip_writer_add_mem(&a, name.c_str(), data.data(), data.size(), MZ_DEFAULT_COMPRESSION);
+            mz_zip_writer_add_mem(&a, name.c_str(), data.data(), data.size(), MZ_DEFAULT_COMPRESSION | flags);
         }
         const bool ok = mz_zip_writer_finalize_archive(&a);
         mz_zip_writer_end(&a);
@@ -133,7 +133,11 @@ TEST_CASE("install: plan rules") {
     CHECK(warned.action == Action::Install && warned.notes.size() == 1 && warned.notes[0].field == "base_rom");
     InstallOptions no_rom = opts();
     no_rom.rom_sha1.clear();
-    CHECK(plan_install(r, parsed(manifest_json("conversion", "nmp", "1.0.0", "{\"folder\": \"c\"}", other_rom)), no_rom).action == Action::Install);
+    CHECK(plan_install(r, parsed(manifest_json("conversion", "nmp", "1.0.0", "{\"folder\": \"c\"}", other_rom)), no_rom).action == Action::Refuse);
+    const Plan unchecked = plan_install(r, parsed(manifest_json("texture-pack", "t", "1.0.0", "{\"rtz\": \"t.rtz\"}", other_rom)), no_rom);
+    CHECK(unchecked.action == Action::Install && unchecked.notes.empty());   // a pack doesn't need the ROM checked
+    // Two parts landing on one path (different source folders, same file name; case doesn't matter).
+    CHECK(plan_install(r, parsed(manifest_json("model-pack", "two", "1.0.0", "{\"packs\": [\"a/x.akimodel\", \"b/X.akimodel\"]}")), opts()).action == Action::Refuse);
 
     const Plan own_use = plan_install(r, parsed(manifest_json("addon", "cam", "1.0.0", "{\"nrm\": \"cam.nrm\"}", ", \"permission\": {\"redistribute\": \"no\"}")), opts());
     CHECK(own_use.notes.size() == 1 && own_use.notes[0].field == "permission");
@@ -209,8 +213,9 @@ TEST_CASE("install: an upgrade replaces unedited files and keeps edited ones") {
     InstallResult up2 = install(make_package(t.path / "v3", manifest_json("addon", "cam", "1.2.0", "{\"nrm\": \"cam.nrm\"}"), { { "cam.nrm", "v3" } }), data, opts());
     CHECK(up2.outcome == Outcome::Upgraded);
     CHECK(read(data / "mods" / "cam.nrm") == "v3");
-    CHECK(read(data / "mods" / "cam.nrm.edited-20261029") == "my edit");
-    CHECK(up2.kept == std::vector<std::string>{ "mods/cam.nrm.edited-20261029" });
+    CHECK(read(data / "kept" / "mods" / "cam.nrm.edited-20261029") == "my edit");   // where no mod scan sees it
+    CHECK(!fs::exists(data / "mods" / "cam.nrm.edited-20261029"));
+    CHECK(up2.kept == std::vector<std::string>{ "kept/mods/cam.nrm.edited-20261029" });
 }
 
 TEST_CASE("install: a hand-placed file is kept, an upgrade drops files the new version doesn't have") {
@@ -220,7 +225,7 @@ TEST_CASE("install: a hand-placed file is kept, an upgrade drops files the new v
     const std::string v1 = manifest_json("model-pack", "q", "1.0.0", "{\"packs\": [\"q-a.akimodel\", \"q-b.akimodel\"]}");
     InstallResult r = install(make_package(t.path / "v1", v1, { { "q-a.akimodel/pack.json", "a1" }, { "q-b.akimodel/pack.json", "b1" } }), data, opts());
     CHECK(r.outcome == Outcome::Installed);
-    CHECK(read(data / "mods" / "models" / "q-a.akimodel.edited-20261029" / "pack.json") == "player's own");
+    CHECK(read(data / "kept" / "mods" / "models" / "q-a.akimodel.edited-20261029" / "pack.json") == "player's own");
     CHECK(read(data / "mods" / "models" / "q-a.akimodel" / "pack.json") == "a1");
     const std::string v2 = manifest_json("model-pack", "q", "2.0.0", "{\"packs\": [\"q-a.akimodel\"]}");
     CHECK(install(make_package(t.path / "v2", v2, { { "q-a.akimodel/pack.json", "a2" } }), data, opts()).outcome == Outcome::Upgraded);
@@ -254,8 +259,10 @@ TEST_CASE("install: an unsafe zip, a broken manifest or a missing payload change
     const fs::path data = t.path / "data";
     const fs::path zip = t.path / "evil.zip";
     CHECK(make_zip(zip, { { "aki-package.json", manifest_json("addon", "evil", "1.0.0", "{\"nrm\": \"e.nrm\"}") }, { "../e.nrm", "x" } }));
-    CHECK(install(zip, data, opts()).outcome == Outcome::Refused);
-    CHECK(!fs::exists(t.path / "e.nrm"));
+    InstallResult evil = install(zip, data, opts());
+    CHECK(evil.outcome == Outcome::Refused);
+    CHECK(evil.message.find("unsafe path") != std::string::npos);   // refused for the path, not for anything else
+    CHECK(!fs::exists(data / "e.nrm") && !fs::exists(data / ".aki-work"));
     const fs::path bad = make_package(t.path / "bad", "{\"format\": 1}", {});
     InstallResult r = install(bad, data, opts());
     CHECK(r.outcome == Outcome::Refused);
@@ -312,4 +319,78 @@ TEST_CASE("install: the drop folder") {
     load_registry(data, reg);
     CHECK(find(reg, "cam") && find(reg, "cam")->source == "dropped");
     CHECK(process_import_folder(data, opts()).empty());  // not-installed and the report are left alone
+}
+
+// Step 2 review findings: each fails on the first version of step 2.
+
+TEST_CASE("install: zips with non-UTF-8 names are refused, not misread; __MACOSX is ignored") {
+    TempDir t;
+    const fs::path data = t.path / "data";
+    const fs::path oem = t.path / "oem.zip";
+    CHECK(make_zip(oem, { { "aki-package.json", manifest_json("texture-pack", "oem", "1.0.0", "{\"rtz\": \"caf\x82.rtz\"}") },
+        { "caf\x82.rtz", "tex" } }, MZ_ZIP_FLAG_ASCII_FILENAME));
+    InstallResult r = install(oem, data, opts());          // must not throw
+    CHECK(r.outcome == Outcome::Refused);
+    CHECK(r.message.find("UTF-8") != std::string::npos);
+    const fs::path mac = t.path / "mac.zip";
+    CHECK(make_zip(mac, { { "Pack/aki-package.json", manifest_json("addon", "cam", "1.0.0", "{\"nrm\": \"cam.nrm\"}") },
+        { "Pack/cam.nrm", "v1" }, { "__MACOSX/Pack/._cam.nrm", "junk" } }));
+    CHECK(install(mac, data, opts()).outcome == Outcome::Installed);
+    CHECK(!fs::exists(data / "__MACOSX"));
+}
+
+TEST_CASE("install: an interrupted install is undone at the next start (journal, not committed)") {
+    TempDir t;
+    const fs::path data = t.path / "data";
+    // State after a crash mid-swap: mods/a.nrm went aside, its new copy was placed; mods/b.rtz (new) placed;
+    // mods/c.rtz still staged. The registry was never written.
+    write(data / "mods" / "a.nrm.replaced", "old a");
+    write(data / "mods" / "a.nrm", "new a");
+    write(data / "mods" / "b.rtz", "new b");
+    write(data / "mods" / "c.rtz.installing", "new c");
+    write(data / ".aki-work" / "install-journal.json", "{\"format\": 1, \"committed\": false, \"delete\": [], \"swaps\": ["
+        "{\"dst\": \"mods/a.nrm\", \"staged\": \"mods/a.nrm.installing\", \"aside\": \"mods/a.nrm.replaced\", \"keep_aside\": false},"
+        "{\"dst\": \"mods/b.rtz\", \"staged\": \"mods/b.rtz.installing\", \"aside\": \"\", \"keep_aside\": false},"
+        "{\"dst\": \"mods/c.rtz\", \"staged\": \"mods/c.rtz.installing\", \"aside\": \"\", \"keep_aside\": false}]}");
+    CHECK(!recover_interrupted_install(data).empty());
+    CHECK(read(data / "mods" / "a.nrm") == "old a");
+    CHECK(!fs::exists(data / "mods" / "a.nrm.replaced"));
+    CHECK(!fs::exists(data / "mods" / "b.rtz"));
+    CHECK(!fs::exists(data / "mods" / "c.rtz.installing") && !fs::exists(data / "mods" / "c.rtz"));
+    CHECK(!fs::exists(data / ".aki-work"));
+    CHECK(recover_interrupted_install(data).empty());       // nothing left to do
+}
+
+TEST_CASE("install: a committed install is finished at the next start; kept copies stay") {
+    TempDir t;
+    const fs::path data = t.path / "data";
+    write(data / "mods" / "a.nrm", "new a");
+    write(data / "mods" / "a.nrm.replaced", "old a");
+    write(data / "mods" / "b.rtz", "new b");
+    write(data / "kept" / "mods" / "b.rtz.edited-20261029", "player's b");
+    write(data / "mods" / "gone.rtz", "old version's file");
+    write(data / ".aki-work" / "install-journal.json", "{\"format\": 1, \"committed\": true, \"delete\": [\"mods/gone.rtz\"], \"swaps\": ["
+        "{\"dst\": \"mods/a.nrm\", \"staged\": \"mods/a.nrm.installing\", \"aside\": \"mods/a.nrm.replaced\", \"keep_aside\": false},"
+        "{\"dst\": \"mods/b.rtz\", \"staged\": \"mods/b.rtz.installing\", \"aside\": \"kept/mods/b.rtz.edited-20261029\", \"keep_aside\": true}]}");
+    CHECK(!recover_interrupted_install(data).empty());
+    CHECK(read(data / "mods" / "a.nrm") == "new a");
+    CHECK(!fs::exists(data / "mods" / "a.nrm.replaced"));
+    CHECK(read(data / "kept" / "mods" / "b.rtz.edited-20261029") == "player's b");
+    CHECK(!fs::exists(data / "mods" / "gone.rtz"));
+    CHECK(!fs::exists(data / ".aki-work"));
+}
+
+TEST_CASE("install: a package holding a link is refused") {
+    TempDir t;
+    const fs::path data = t.path / "data";
+    const fs::path pkg = make_package(t.path / "p", manifest_json("model-pack", "q", "1.0.0", "{\"packs\": [\"q.akimodel\"]}"), { { "q.akimodel/pack.json", "a" } });
+    write(t.path / "elsewhere" / "secret.txt", "s");
+    std::error_code ec;
+    fs::create_directory_symlink(t.path / "elsewhere", pkg / "q.akimodel" / "link", ec);
+    if (ec) {
+        return;   // no symlink rights (Windows without developer mode): nothing to test here
+    }
+    InstallResult r = install(pkg, data, opts());
+    CHECK(r.outcome == Outcome::Refused);
+    CHECK(!fs::exists(data / "mods" / "models" / "q.akimodel"));
 }

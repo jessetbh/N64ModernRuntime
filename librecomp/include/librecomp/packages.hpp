@@ -161,6 +161,9 @@ namespace recomp {
         // something in it can't be read.
         std::optional<uint64_t> hash_path(const std::filesystem::path &path, size_t chunk_size = size_t(1) << 20);
 
+        // The SHA-1 of a file (lower-case hex), streamed; nullopt when it can't be read. For base_rom checks.
+        std::optional<std::string> sha1_file(const std::filesystem::path &path);
+
         // <data>/packages.json; an absent file is an empty registry (Ok).
         RegistryStatus load_registry(const std::filesystem::path &data_dir, Registry &out);
         // Writes <data>/packages.json through a temporary file (flushed to disk) and a rename, retried briefly while
@@ -171,7 +174,8 @@ namespace recomp {
 
         struct InstallOptions {
             std::string game_id;            // this port's mod game id: a package for another game is refused
-            std::string rom_sha1;           // the player's ROM, lower-case hex ("" = unknown: base_rom isn't checked)
+            std::string rom_sha1;           // the player's ROM, lower-case hex ("" = unknown: a conversion naming a
+                                            // base_rom is then refused, anything else only warns)
             std::string recomp_version;     // this build, for requires.minimum_recomp_version ("" = not checked)
             std::string source = "launcher";// recorded in the registry: launcher / dropped / bundled / migrated
             bool reinstall = false;         // the same version is installed: install it again
@@ -210,13 +214,17 @@ namespace recomp {
         };
         // The install rules, pure (the registry as loaded, the parsed manifest):
         // - the package must be for this game, and this build must be at least requires.minimum_recomp_version;
-        // - base_rom: a conversion for another ROM is refused, anything else only warns;
+        // - base_rom: a conversion for another ROM (or when the player's ROM isn't known) is refused, anything else
+        //   only warns;
+        // - no two parts may land on the same path (or one inside another);
         // - its id and paths must not belong to another package (conflict(), the replaced ones excepted);
         // - an installed copy decides upgrade / reinstall / downgrade / already installed by version.
         Plan plan_install(const Registry &registry, const Manifest &manifest, const InstallOptions &options);
 
-        // The name an edited or hand-placed file is kept under when a package takes its place:
-        // <path>.edited-<date>, then <path>.edited-<date>-2, -3, ... while taken(name) says that one exists.
+        // The name an edited or hand-placed file is kept under when a package takes its place: <path>.edited-<date>,
+        // then <path>.edited-<date>-2, -3, ... while taken(name) says that one exists. install() puts kept copies
+        // under KeptFolder (kept/<path>.edited-<date>), where no mod, texture or conversion scan sees them.
+        constexpr const char *KeptFolder = "kept";
         template <typename Taken>
         std::string edited_name(const std::string &path, const std::string &date, Taken taken) {
             const std::string base = normal_path(path) + ".edited-" + date;
@@ -243,10 +251,18 @@ namespace recomp {
             std::string message;                    // one line for the player
         };
         // Installs a package (a folder or a .zip holding aki-package.json at its root, or inside its only top-level
-        // folder) into the data folder by the rules above. Every part is staged first and swapped in after; a failure
-        // puts back what was there. Upgrades replace unedited files, keep edited and hand-placed ones as
-        // .edited-<date>, and drop the old version's unedited files the new one no longer has. Never touches saves.
+        // folder; a __MACOSX folder or .DS_Store beside it is ignored) into the data folder by the rules above. A zip
+        // must use UTF-8 names (old zips in a local code page are refused, not misread) and unpack to at most 16 GiB
+        // with room to spare; a package may not contain symlinks. Every part is staged first and swapped in after;
+        // a failure puts back what was there, and a journal (.aki-work/install-journal.json) lets the next start
+        // finish or undo an install a crash interrupted. Upgrades replace unedited files, keep edited and
+        // hand-placed ones under kept/ (<path>.edited-<date>), and drop the old version's unedited files the new one
+        // no longer has. Never touches saves. Never throws.
         InstallResult install(const std::filesystem::path &package, const std::filesystem::path &data_dir, const InstallOptions &options);
+
+        // Finishes or undoes an install a crash interrupted (from its journal). install() and the drop folder call it
+        // first; a game calls it at start. Returns a line for the log, or "" when there was nothing to do.
+        std::string recover_interrupted_install(const std::filesystem::path &data_dir);
 
         struct RemoveResult {
             bool removed = false;

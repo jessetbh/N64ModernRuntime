@@ -750,13 +750,26 @@ namespace recomp::packages {
             compare_versions(options.recomp_version, m.requires_recomp) < 0) {
             return refuse("it needs game build " + m.requires_recomp + " or newer (this is " + options.recomp_version + ")");
         }
-        if (!options.rom_sha1.empty() && !m.base_rom_sha1.empty() &&
-            std::find(m.base_rom_sha1.begin(), m.base_rom_sha1.end(), lower(options.rom_sha1)) == m.base_rom_sha1.end()) {
+        if (!m.base_rom_sha1.empty()) {
             const std::string rom = m.base_rom_name.empty() ? std::string("a different ROM") : m.base_rom_name;
-            if (m.kind == Kind::Conversion) {
-                return refuse("it needs " + rom + "; your ROM is a different one");
+            if (options.rom_sha1.empty()) {
+                if (m.kind == Kind::Conversion) {
+                    return refuse("it needs " + rom + ", and your ROM can't be checked (import it in the game first)");
+                }
             }
-            plan.notes.push_back({ false, "base_rom", "made for " + rom + "; it may not work with your ROM" });
+            else if (std::find(m.base_rom_sha1.begin(), m.base_rom_sha1.end(), lower(options.rom_sha1)) == m.base_rom_sha1.end()) {
+                if (m.kind == Kind::Conversion) {
+                    return refuse("it needs " + rom + "; your ROM is a different one");
+                }
+                plan.notes.push_back({ false, "base_rom", "made for " + rom + "; it may not work with your ROM" });
+            }
+        }
+        for (size_t i = 0; i < plan.places.size(); i++) {
+            for (size_t j = i + 1; j < plan.places.size(); j++) {
+                if (covers(plan.places[i].to, plan.places[j].to) || covers(plan.places[j].to, plan.places[i].to)) {
+                    return refuse(plan.places[i].from + " and " + plan.places[j].from + " would both install to " + plan.places[j].to);
+                }
+            }
         }
         if (m.permission.redistribute == "no") {
             plan.notes.push_back({ false, "permission", "for your own use: the authors don't allow sharing it" });

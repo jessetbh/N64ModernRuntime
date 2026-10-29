@@ -139,6 +139,85 @@ namespace recomp::packages {
         return hash.h;
     }
 
+    std::optional<std::string> sha1_file(const fs::path &path) {
+        FILE *f = open_file(path, "rb");
+        if (!f) {
+            return std::nullopt;
+        }
+        uint32_t h[5] = { 0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u };
+        auto rol = [](uint32_t x, int n) { return (x << n) | (x >> (32 - n)); };
+        auto block = [&](const unsigned char *p) {
+            uint32_t w[80];
+            for (int i = 0; i < 16; i++) {
+                w[i] = (uint32_t(p[4 * i]) << 24) | (uint32_t(p[4 * i + 1]) << 16) | (uint32_t(p[4 * i + 2]) << 8) | uint32_t(p[4 * i + 3]);
+            }
+            for (int i = 16; i < 80; i++) {
+                w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+            }
+            uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+            for (int i = 0; i < 80; i++) {
+                uint32_t fn, k;
+                if (i < 20) { fn = (b & c) | (~b & d); k = 0x5A827999u; }
+                else if (i < 40) { fn = b ^ c ^ d; k = 0x6ED9EBA1u; }
+                else if (i < 60) { fn = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDCu; }
+                else { fn = b ^ c ^ d; k = 0xCA62C1D6u; }
+                const uint32_t t = rol(a, 5) + fn + e + k + w[i];
+                e = d; d = c; c = rol(b, 30); b = a; a = t;
+            }
+            h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+        };
+        std::vector<unsigned char> buf(size_t(1) << 20);
+        uint64_t total = 0;
+        unsigned char tail[128];
+        size_t tail_len = 0;
+        bool ok = true;
+        while (true) {
+            const size_t n = std::fread(buf.data(), 1, buf.size(), f);
+            total += n;
+            size_t i = 0;
+            if (tail_len > 0) {
+                while (tail_len < 64 && i < n) {
+                    tail[tail_len++] = buf[i++];
+                }
+                if (tail_len == 64) {
+                    block(tail);
+                    tail_len = 0;
+                }
+            }
+            for (; i + 64 <= n; i += 64) {
+                block(buf.data() + i);
+            }
+            while (i < n) {
+                tail[tail_len++] = buf[i++];
+            }
+            if (n < buf.size()) {
+                ok = !std::ferror(f);
+                break;
+            }
+        }
+        std::fclose(f);
+        if (!ok) {
+            return std::nullopt;
+        }
+        tail[tail_len++] = 0x80;
+        if (tail_len > 56) {
+            while (tail_len < 64) tail[tail_len++] = 0;
+            block(tail);
+            tail_len = 0;
+        }
+        while (tail_len < 56) tail[tail_len++] = 0;
+        const uint64_t bits = total * 8;
+        for (int i = 7; i >= 0; i--) {
+            tail[tail_len++] = static_cast<unsigned char>(bits >> (8 * i));
+        }
+        block(tail);
+        char hex[41];
+        for (int i = 0; i < 5; i++) {
+            std::snprintf(hex + 8 * i, 9, "%08x", h[i]);
+        }
+        return std::string(hex, 40);
+    }
+
     RegistryStatus load_registry(const fs::path &data_dir, Registry &out) {
         out = Registry{};
         const fs::path file = data_dir / RegistryFile;

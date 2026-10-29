@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <exception>
 #include <random>
 #include <system_error>
 
@@ -20,6 +21,16 @@ namespace recomp::packages {
     using json = nlohmann::json;
 
     namespace {
+        constexpr uint64_t MaxUnpackedBytes = uint64_t(16) << 30;   // 16 GiB: bigger than any real pack, stops a zip bomb
+        constexpr uint64_t SpareBytes = uint64_t(512) << 20;        // leave this much free after unpacking
+        constexpr const char *WorkFolder = ".aki-work";
+        constexpr const char *JournalFile = "install-journal.json";
+
+        std::string lower(std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+            return s;
+        }
+
         fs::path u8path(const std::string &s) {
             return fs::path(std::u8string(s.begin(), s.end()));
         }
@@ -29,9 +40,31 @@ namespace recomp::packages {
             return std::string(s.begin(), s.end());
         }
 
-        std::string lower(std::string s) {
-            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-            return s;
+        // Well-formed UTF-8 (no overlongs, no surrogates, nothing past U+10FFFF).
+        bool valid_utf8(const std::string &s) {
+            size_t i = 0;
+            while (i < s.size()) {
+                const unsigned char c = s[i];
+                size_t n;
+                uint32_t cp;
+                if (c < 0x80) { i++; continue; }
+                else if ((c & 0xE0) == 0xC0) { n = 1; cp = c & 0x1F; }
+                else if ((c & 0xF0) == 0xE0) { n = 2; cp = c & 0x0F; }
+                else if ((c & 0xF8) == 0xF0) { n = 3; cp = c & 0x07; }
+                else { return false; }
+                if (i + n >= s.size()) { return false; }   // the sequence runs past the end
+                for (size_t k = 1; k <= n; k++) {
+                    const unsigned char cc = s[i + k];
+                    if ((cc & 0xC0) != 0x80) { return false; }
+                    cp = (cp << 6) | (cc & 0x3F);
+                }
+                if ((n == 1 && cp < 0x80) || (n == 2 && cp < 0x800) || (n == 3 && cp < 0x10000) || cp > 0x10FFFF ||
+                    (cp >= 0xD800 && cp <= 0xDFFF)) {
+                    return false;
+                }
+                i += n + 1;
+            }
+            return true;
         }
 
         std::string today_local() {
@@ -60,15 +93,22 @@ namespace recomp::packages {
             return buf;
         }
 
-        std::string read_small_file(const fs::path &path) {
+        FILE *open_file(const fs::path &path, const wchar_t *wmode, const char *mode) {
             FILE *f = nullptr;
 #ifdef _WIN32
-            if (_wfopen_s(&f, path.c_str(), L"rb") != 0) {
+            (void)mode;
+            if (_wfopen_s(&f, path.c_str(), wmode) != 0) {
                 f = nullptr;
             }
 #else
-            f = std::fopen(path.c_str(), "rb");
+            (void)wmode;
+            f = std::fopen(path.c_str(), mode);
 #endif
+            return f;
+        }
+
+        std::string read_small_file(const fs::path &path) {
+            FILE *f = open_file(path, L"rb", "rb");
             if (!f) {
                 return {};
             }
@@ -83,44 +123,53 @@ namespace recomp::packages {
         }
 
         bool write_small_file(const fs::path &path, const std::string &text) {
-            FILE *f = nullptr;
-#ifdef _WIN32
-            if (_wfopen_s(&f, path.c_str(), L"wb") != 0) {
-                f = nullptr;
-            }
-#else
-            f = std::fopen(path.c_str(), "wb");
-#endif
+            FILE *f = open_file(path, L"wb", "wb");
             if (!f) {
                 return false;
             }
-            const bool ok = std::fwrite(text.data(), 1, text.size(), f) == text.size();
+            const bool ok = std::fwrite(text.data(), 1, text.size(), f) == text.size() && std::fflush(f) == 0;
             return (std::fclose(f) == 0) && ok;
         }
 
-        // A fresh working folder under <data>/.aki-work, removed by its owner.
+        // Writes through a temporary file and a rename, so a reader never sees half of it.
+        bool write_replacing(const fs::path &path, const std::string &text) {
+            fs::path temp = path;
+            temp += ".tmp";
+            if (!write_small_file(temp, text)) {
+                return false;
+            }
+            std::error_code ec;
+            fs::rename(temp, path, ec);
+            if (ec) {
+                fs::remove(temp, ec);
+                return false;
+            }
+            return true;
+        }
+
+        std::string dump(const json &j) {
+            return j.dump(2, ' ', false, json::error_handler_t::replace) + "\n";
+        }
+
         fs::path work_folder(const fs::path &data_dir, const char *what) {
             static std::mt19937_64 rng{ std::random_device{}() ^ uint64_t(std::chrono::steady_clock::now().time_since_epoch().count()) };
             char name[64];
-            std::snprintf(name, sizeof(name), ".%s-%016llx", what, static_cast<unsigned long long>(rng()));
-            return data_dir / ".aki-work" / name;
+            std::snprintf(name, sizeof(name), "%s-%016llx", what, static_cast<unsigned long long>(rng()));
+            return data_dir / WorkFolder / name;
+        }
+
+        bool ignorable(const std::string &top_level_name) {
+            return top_level_name == "__MACOSX" || top_level_name == ".DS_Store";
         }
 
         size_t write_to_file(void *opaque, mz_uint64, const void *data, size_t n) {
             return std::fwrite(data, 1, n, static_cast<FILE *>(opaque));
         }
 
-        // Extracts a zip into dst. Every entry name must be a safe relative path (no zip-slip); entries are streamed
-        // to disk, never held whole in memory. Empty on success, else why not.
+        // Extracts a zip into dst. Entry names must be UTF-8 (the zip's UTF-8 flag, or plain ASCII) and safe relative
+        // paths; the total size is capped; entries stream to disk. Empty on success, else why not.
         std::string extract_zip(const fs::path &zip, const fs::path &dst) {
-            FILE *zf = nullptr;
-#ifdef _WIN32
-            if (_wfopen_s(&zf, zip.c_str(), L"rb") != 0) {
-                zf = nullptr;
-            }
-#else
-            zf = std::fopen(zip.c_str(), "rb");
-#endif
+            FILE *zf = open_file(zip, L"rb", "rb");
             if (!zf) {
                 return "it can't be opened";
             }
@@ -131,14 +180,44 @@ namespace recomp::packages {
             }
             std::string error;
             const mz_uint count = mz_zip_reader_get_num_files(&archive);
+            uint64_t total = 0;
+            std::vector<mz_zip_archive_file_stat> stats;
             for (mz_uint i = 0; i < count && error.empty(); i++) {
                 mz_zip_archive_file_stat st;
                 if (!mz_zip_reader_file_stat(&archive, i, &st)) {
                     error = "the zip is damaged";
                     break;
                 }
+                const std::string raw = st.m_filename;
+                const bool utf8_flag = (st.m_bit_flag & (1u << 11)) != 0;
+                const bool ascii = std::all_of(raw.begin(), raw.end(), [](unsigned char c) { return c < 0x80; });
+                if ((!utf8_flag && !ascii) || !valid_utf8(raw)) {
+                    error = "its file names aren't UTF-8 (re-zip it with a current zip tool)";
+                    break;
+                }
+                total += st.m_uncomp_size;
+                stats.push_back(st);
+            }
+            if (error.empty() && total > MaxUnpackedBytes) {
+                error = "it unpacks to more than 16 GiB";
+            }
+            if (error.empty()) {
+                std::error_code ec;
+                const fs::space_info space = fs::space(dst, ec);
+                if (!ec && space.available < total + SpareBytes) {
+                    error = "there isn't enough free disk space to unpack it";
+                }
+            }
+            for (const mz_zip_archive_file_stat &st : stats) {
+                if (!error.empty()) {
+                    break;
+                }
                 std::string name = st.m_filename;
                 std::replace(name.begin(), name.end(), '\\', '/');
+                const std::string top = name.substr(0, name.find('/'));
+                if (ignorable(top)) {
+                    continue;
+                }
                 if (!safe_relative_path(name)) {
                     error = "the zip holds an unsafe path (" + name + ")";
                     break;
@@ -152,20 +231,17 @@ namespace recomp::packages {
                     }
                     continue;
                 }
-                fs::create_directories(out.parent_path(), ec);
-                FILE *of = nullptr;
-#ifdef _WIN32
-                if (_wfopen_s(&of, out.c_str(), L"wb") != 0) {
-                    of = nullptr;
+                if (fs::exists(out, ec)) {
+                    error = "the zip holds " + name + " twice (or two names that differ only in case)";
+                    break;
                 }
-#else
-                of = std::fopen(out.c_str(), "wb");
-#endif
+                fs::create_directories(out.parent_path(), ec);
+                FILE *of = open_file(out, L"wb", "wb");
                 if (!of) {
                     error = "can't write " + name;
                     break;
                 }
-                const bool ok = mz_zip_reader_extract_to_callback(&archive, i, write_to_file, of, 0);
+                const bool ok = mz_zip_reader_extract_to_callback(&archive, st.m_file_index, write_to_file, of, 0);
                 if (std::fclose(of) != 0 || !ok) {
                     error = "can't extract " + name;
                 }
@@ -184,6 +260,9 @@ namespace recomp::packages {
             std::optional<fs::path> only;
             int entries = 0;
             for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+                if (ignorable(u8str(it->path().filename()))) {
+                    continue;
+                }
                 entries++;
                 if (it->is_directory(ec)) {
                     only = it->path();
@@ -193,6 +272,24 @@ namespace recomp::packages {
                 return only;
             }
             return std::nullopt;
+        }
+
+        // Whether a package source holds a symlink or junction anywhere (it isn't copied: it could point anywhere).
+        bool has_link(const fs::path &p) {
+            std::error_code ec;
+            if (fs::is_symlink(fs::symlink_status(p, ec))) {
+                return true;
+            }
+            if (!fs::is_directory(fs::symlink_status(p, ec))) {
+                return false;
+            }
+            for (fs::recursive_directory_iterator it(p, fs::directory_options::none, ec), end; !ec && it != end; it.increment(ec)) {
+                std::error_code e;
+                if (it->is_symlink(e)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         const InstalledFile *record_for(const Entry *entry, const std::string &path) {
@@ -213,226 +310,407 @@ namespace recomp::packages {
             return !ec;
         }
 
-        // One swap of a destination path: what was there moves aside, the staged copy moves in.
+        // One swap of a destination: what is there moves aside, the staged copy moves in. All paths data-relative.
         struct Swap {
-            fs::path dst, staged;
-            fs::path aside;         // where the old content went ("" = there was none)
-            bool keep_aside = false;// an edited / hand-placed copy: stays as .edited-<date> after success
-            bool done = false;
+            std::string dst, staged;
+            std::string aside;          // where the old content goes ("" = there is none)
+            bool keep_aside = false;    // an edited / hand-placed copy: stays (under kept/) after success
+            bool moved_aside = false;
+            bool placed = false;
         };
 
-        void roll_back(std::vector<Swap> &swaps) {
+        json journal_json(const std::vector<Swap> &swaps, const std::vector<std::string> &to_delete, bool committed) {
+            json list = json::array();
+            for (const Swap &s : swaps) {
+                list.push_back({ { "dst", s.dst }, { "staged", s.staged }, { "aside", s.aside }, { "keep_aside", s.keep_aside } });
+            }
+            return { { "format", 1 }, { "committed", committed }, { "swaps", list }, { "delete", to_delete } };
+        }
+
+        // Undoes the swaps (newest first). Returns the paths it couldn't put back, for the message.
+        std::vector<std::string> roll_back(const fs::path &data_dir, std::vector<Swap> &swaps) {
+            std::vector<std::string> stuck;
             for (auto it = swaps.rbegin(); it != swaps.rend(); ++it) {
                 std::error_code ec;
-                if (it->done) {
-                    fs::remove_all(it->dst, ec);
+                const fs::path dst = data_dir / u8path(it->dst);
+                if (it->placed) {
+                    fs::remove_all(dst, ec);
                 }
-                if (!it->aside.empty()) {
-                    fs::rename(it->aside, it->dst, ec);
+                if (it->moved_aside) {
+                    ec.clear();
+                    fs::rename(data_dir / u8path(it->aside), dst, ec);
+                    if (ec) {
+                        stuck.push_back(it->dst + " (it's at " + it->aside + ")");
+                    }
                 }
-                fs::remove_all(it->staged, ec);
+                fs::remove_all(data_dir / u8path(it->staged), ec);
+            }
+            return stuck;
+        }
+
+        InstallResult install_impl(const fs::path &package, const fs::path &data_dir, const InstallOptions &options_in) {
+            InstallResult result;
+            InstallOptions options = options_in;
+            if (options.date.empty()) {
+                options.date = today_local();
+            }
+            if (options.now.empty()) {
+                options.now = now_utc();
+            }
+            auto finish = [&](Outcome outcome, const std::string &message) {
+                result.outcome = outcome;
+                result.message = message;
+                return result;
+            };
+            std::error_code ec;
+            if (const std::string recovered = recover_interrupted_install(data_dir); !recovered.empty()) {
+                std::printf("[wcw] packages: %s\n", recovered.c_str());
+            }
+
+            // 1. The package folder (a zip is unpacked into a working folder first).
+            struct Cleanup {
+                fs::path p;
+                ~Cleanup() {
+                    if (!p.empty()) {
+                        std::error_code e;
+                        fs::remove_all(p, e);
+                        fs::remove(p.parent_path(), e);   // .aki-work, when nothing else is in it
+                    }
+                }
+            } cleanup;
+            fs::path folder = package;
+            if (fs::is_regular_file(package, ec)) {
+                if (lower(u8str(package.extension())) != ".zip") {
+                    return finish(Outcome::Refused, "not a package: expected a folder or a .zip with aki-package.json");
+                }
+                const fs::path unpacked = work_folder(data_dir, "unpack");
+                cleanup.p = unpacked;
+                fs::create_directories(unpacked, ec);
+                if (ec) {
+                    return finish(Outcome::Failed, "can't unpack it: " + ec.message());
+                }
+                if (const std::string why = extract_zip(package, unpacked); !why.empty()) {
+                    return finish(Outcome::Refused, "can't unpack it: " + why);
+                }
+                folder = unpacked;
+            }
+            else if (!fs::is_directory(package, ec)) {
+                return finish(Outcome::Refused, "not found");
+            }
+            const std::optional<fs::path> root = package_root(folder);
+            if (!root) {
+                return finish(Outcome::Refused, "not a package: no aki-package.json at its root");
+            }
+
+            // 2. The manifest.
+            Manifest m;
+            if (!parse_manifest(read_small_file(*root / ManifestFile), m, result.problems)) {
+                return finish(Outcome::Refused, "its aki-package.json has errors");
+            }
+            result.id = m.id;
+            result.display_name = m.display_name;
+            result.version = m.version;
+            result.kind = m.kind;
+
+            // 3. The registry and the plan.
+            Registry registry;
+            const RegistryStatus status = load_registry(data_dir, registry);
+            if (!may_save(status)) {
+                return finish(Outcome::Refused, status == RegistryStatus::Newer ?
+                    "packages.json was written by a newer version; update the game first" :
+                    "packages.json can't be read; nothing was changed");
+            }
+            const Plan plan = plan_install(registry, m, options);
+            result.old_version = plan.old_version;
+            result.problems.insert(result.problems.end(), plan.notes.begin(), plan.notes.end());
+            if (plan.action == Action::Refuse) {
+                return finish(Outcome::Refused, plan.reason);
+            }
+            if (plan.action == Action::AlreadyInstalled) {
+                return finish(Outcome::AlreadyInstalled, plan.reason);
+            }
+            for (const Placement &p : plan.places) {
+                const fs::path src = *root / u8path(p.from);
+                if (p.folder ? !fs::is_directory(src, ec) : !fs::is_regular_file(src, ec)) {
+                    return finish(Outcome::Refused, "it names " + p.from + ", which isn't in the package");
+                }
+                if (has_link(src)) {
+                    return finish(Outcome::Refused, p.from + " holds a link to somewhere else; packages can't contain links");
+                }
+            }
+
+            // 4. Decide every swap up front (where the current content goes), then stage the new parts.
+            const Entry *old = find(registry, m.id);
+            std::vector<const Entry *> replaced;
+            for (const std::string &r : plan.replaced) {
+                replaced.push_back(find(registry, r));
+            }
+            auto owner_record = [&](const std::string &to) -> const InstalledFile * {
+                if (const InstalledFile *f = record_for(old, to)) {
+                    return f;
+                }
+                for (const Entry *e : replaced) {
+                    if (const InstalledFile *f = record_for(e, to)) {
+                        return f;
+                    }
+                }
+                return nullptr;
+            };
+            std::vector<std::string> reserved;   // kept names chosen in this install
+            std::vector<Swap> swaps;
+            for (const Placement &p : plan.places) {
+                Swap s;
+                s.dst = normal_path(p.to);
+                s.staged = s.dst + ".installing";
+                const fs::path dst = data_dir / u8path(s.dst);
+                if (fs::exists(dst, ec)) {
+                    const InstalledFile *rec = owner_record(p.to);
+                    if (rec && file_state(*rec, hash_path(dst)) == FileState::Unchanged) {
+                        s.aside = s.dst + ".replaced";
+                    }
+                    else {
+                        // Edited by the player, or put there by hand: kept, never overwritten.
+                        s.aside = std::string(KeptFolder) + "/" + edited_name(s.dst, options.date, [&](const std::string &n) {
+                            const std::string k = std::string(KeptFolder) + "/" + n;
+                            std::error_code e;
+                            return fs::exists(data_dir / u8path(k), e) || std::find(reserved.begin(), reserved.end(), k) != reserved.end();
+                        });
+                        reserved.push_back(s.aside);
+                        s.keep_aside = true;
+                    }
+                }
+                swaps.push_back(s);
+            }
+            for (size_t i = 0; i < swaps.size(); i++) {
+                const fs::path staged = data_dir / u8path(swaps[i].staged);
+                fs::remove_all(staged, ec);
+                fs::create_directories(staged.parent_path(), ec);
+                ec.clear();
+                if (plan.places[i].folder) {
+                    fs::copy(*root / u8path(plan.places[i].from), staged, fs::copy_options::recursive, ec);
+                }
+                else {
+                    fs::copy_file(*root / u8path(plan.places[i].from), staged, ec);
+                }
+                if (ec) {
+                    const std::string why = ec.message();
+                    roll_back(data_dir, swaps);
+                    return finish(Outcome::Failed, "can't copy " + plan.places[i].from + ": " + why);
+                }
+            }
+
+            // 5. The journal, then the swaps. A crash from here on is finished or undone at the next start.
+            fs::create_directories(data_dir / WorkFolder, ec);
+            const fs::path journal = data_dir / WorkFolder / JournalFile;
+            if (!write_replacing(journal, dump(journal_json(swaps, {}, false)))) {
+                roll_back(data_dir, swaps);
+                return finish(Outcome::Failed, "can't write the install journal; nothing was changed");
+            }
+            auto fail = [&](const std::string &why) {
+                const std::vector<std::string> stuck = roll_back(data_dir, swaps);
+                std::error_code e;
+                fs::remove(journal, e);
+                fs::remove(data_dir / WorkFolder, e);
+                std::string message = why;
+                if (!stuck.empty()) {
+                    message += "; couldn't put back:";
+                    for (const std::string &s : stuck) {
+                        message += " " + s;
+                    }
+                }
+                return finish(Outcome::Failed, message);
+            };
+            for (Swap &s : swaps) {
+                const fs::path dst = data_dir / u8path(s.dst);
+                if (!s.aside.empty()) {
+                    const fs::path aside = data_dir / u8path(s.aside);
+                    fs::remove_all(aside, ec);   // a stale .replaced from before (kept names are always fresh)
+                    fs::create_directories(aside.parent_path(), ec);
+                    ec.clear();
+                    fs::rename(dst, aside, ec);
+                    if (ec) {
+                        return fail("can't move " + s.dst + " aside: " + ec.message());
+                    }
+                    s.moved_aside = true;
+                }
+                ec.clear();
+                fs::rename(data_dir / u8path(s.staged), dst, ec);
+                if (ec) {
+                    return fail("can't install " + s.dst + ": " + ec.message());
+                }
+                s.placed = true;
+            }
+
+            // 6. The new registry entry (hashes of what was installed).
+            Entry entry;
+            entry.id = m.id;
+            entry.kind = m.kind;
+            entry.version = m.version;
+            entry.display_name = m.display_name;
+            entry.source = options.source;
+            entry.installed = options.now;
+            for (const Swap &s : swaps) {
+                const std::optional<uint64_t> h = hash_path(data_dir / u8path(s.dst));
+                if (!h) {
+                    return fail("can't read back " + s.dst);
+                }
+                entry.files.push_back({ s.dst, *h });
+            }
+
+            // 7. The old version's and the replaced packages' files the new one doesn't use: unedited ones go, edited
+            //    ones stay where they are (now the player's own).
+            std::vector<std::string> to_delete;
+            auto retire = [&](const Entry *e) {
+                if (!e) {
+                    return;
+                }
+                for (const InstalledFile &f : e->files) {
+                    const bool reused = std::any_of(entry.files.begin(), entry.files.end(),
+                        [&](const InstalledFile &n) { return lower(n.path) == lower(normal_path(f.path)); });
+                    if (reused) {
+                        continue;
+                    }
+                    switch (file_state(f, hash_path(data_dir / u8path(f.path)))) {
+                        case FileState::Unchanged: to_delete.push_back(normal_path(f.path)); break;
+                        case FileState::Edited: result.kept.push_back(normal_path(f.path)); break;
+                        case FileState::Missing: break;
+                    }
+                }
+            };
+            retire(old);
+            for (const Entry *e : replaced) {
+                retire(e);
+            }
+
+            Registry updated = registry;
+            for (const std::string &r : plan.replaced) {
+                remove(updated, r);
+            }
+            upsert(updated, entry);
+            if (!save_registry(data_dir, updated)) {
+                return fail("can't write packages.json; nothing was changed");
+            }
+
+            // 8. Committed: the cleanup can't be undone any more, so the journal says to finish it after a crash.
+            write_replacing(journal, dump(journal_json(swaps, to_delete, true)));
+            for (const Swap &s : swaps) {
+                if (s.keep_aside) {
+                    result.kept.push_back(s.aside);
+                }
+                else if (!s.aside.empty()) {
+                    remove_path(data_dir / u8path(s.aside));
+                }
+            }
+            for (const std::string &p : to_delete) {
+                remove_path(data_dir / u8path(p));
+            }
+            fs::remove(journal, ec);
+            fs::remove(data_dir / WorkFolder, ec);
+
+            const std::string name = m.display_name + " " + m.version;
+            std::string kept_note;
+            if (!result.kept.empty()) {
+                kept_note = " (" + std::to_string(result.kept.size()) + " of your edited files kept)";
+            }
+            switch (plan.action) {
+                case Action::Upgrade: return finish(Outcome::Upgraded, "updated " + m.display_name + " " + plan.old_version + " -> " + m.version + kept_note);
+                case Action::Reinstall: return finish(Outcome::Reinstalled, "reinstalled " + name + kept_note);
+                case Action::Downgrade: return finish(Outcome::Downgraded, "went back to " + name + " (from " + plan.old_version + ")" + kept_note);
+                default: return finish(Outcome::Installed, std::string("installed ") + name + " (" + kind_name(m.kind) + ")" + kept_note);
             }
         }
     }
 
-    InstallResult install(const fs::path &package, const fs::path &data_dir, const InstallOptions &options_in) {
-        InstallResult result;
-        InstallOptions options = options_in;
-        if (options.date.empty()) {
-            options.date = today_local();
-        }
-        if (options.now.empty()) {
-            options.now = now_utc();
-        }
-        auto finish = [&](Outcome outcome, const std::string &message) {
-            result.outcome = outcome;
-            result.message = message;
-            return result;
-        };
+    std::string recover_interrupted_install(const fs::path &data_dir) {
+        const fs::path journal = data_dir / WorkFolder / JournalFile;
         std::error_code ec;
-
-        // 1. The package folder (a zip is unpacked into a working folder first).
-        fs::path unpacked;
-        struct Cleanup {
-            fs::path p;
-            ~Cleanup() {
-                if (!p.empty()) {
-                    std::error_code e;
-                    fs::remove_all(p, e);
-                    fs::remove(p.parent_path(), e);   // .aki-work, when nothing else is in it
-                }
-            }
-        } cleanup;
-        fs::path folder = package;
-        if (fs::is_regular_file(package, ec)) {
-            std::string ext = lower(u8str(package.extension()));
-            if (ext != ".zip") {
-                return finish(Outcome::Refused, "not a package: expected a folder or a .zip with aki-package.json");
-            }
-            unpacked = work_folder(data_dir, "unpack");
-            cleanup.p = unpacked;
-            fs::create_directories(unpacked, ec);
-            if (ec) {
-                return finish(Outcome::Failed, "can't unpack it: " + ec.message());
-            }
-            if (const std::string why = extract_zip(package, unpacked); !why.empty()) {
-                return finish(Outcome::Refused, "can't unpack it: " + why);
-            }
-            folder = unpacked;
+        if (!fs::exists(journal, ec)) {
+            return {};
         }
-        else if (!fs::is_directory(package, ec)) {
-            return finish(Outcome::Refused, "not found");
+        const json j = json::parse(read_small_file(journal), nullptr, false);
+        if (j.is_discarded() || !j.is_object() || !j.contains("swaps") || !j["swaps"].is_array()) {
+            fs::remove(journal, ec);
+            return "an unreadable install journal was removed";
         }
-        const std::optional<fs::path> root = package_root(folder);
-        if (!root) {
-            return finish(Outcome::Refused, "not a package: no aki-package.json at its root");
-        }
-
-        // 2. The manifest.
-        Manifest m;
-        if (!parse_manifest(read_small_file(*root / ManifestFile), m, result.problems)) {
-            return finish(Outcome::Refused, "its aki-package.json has errors");
-        }
-        result.id = m.id;
-        result.display_name = m.display_name;
-        result.version = m.version;
-        result.kind = m.kind;
-
-        // 3. The registry and the plan.
-        Registry registry;
-        const RegistryStatus status = load_registry(data_dir, registry);
-        if (!may_save(status)) {
-            return finish(Outcome::Refused, status == RegistryStatus::Newer ?
-                "packages.json was written by a newer version; update the game first" :
-                "packages.json can't be read; nothing was changed");
-        }
-        Plan plan = plan_install(registry, m, options);
-        result.old_version = plan.old_version;
-        result.problems.insert(result.problems.end(), plan.notes.begin(), plan.notes.end());
-        if (plan.action == Action::Refuse) {
-            return finish(Outcome::Refused, plan.reason);
-        }
-        if (plan.action == Action::AlreadyInstalled) {
-            return finish(Outcome::AlreadyInstalled, plan.reason);
-        }
-        for (const Placement &p : plan.places) {
-            const fs::path src = *root / u8path(p.from);
-            if (p.folder ? !fs::is_directory(src, ec) : !fs::is_regular_file(src, ec)) {
-                return finish(Outcome::Refused, "it names " + p.from + ", which isn't in the package");
-            }
-        }
-
-        // 4. Stage every part next to its destination.
-        const Entry *old = find(registry, m.id);
-        std::vector<const Entry *> replaced;
-        for (const std::string &r : plan.replaced) {
-            replaced.push_back(find(registry, r));
-        }
-        std::vector<Swap> swaps;
-        for (const Placement &p : plan.places) {
-            Swap s;
-            s.dst = data_dir / u8path(p.to);
-            s.staged = s.dst;
-            s.staged += ".installing";
-            fs::remove_all(s.staged, ec);
-            fs::create_directories(s.dst.parent_path(), ec);
-            ec.clear();
-            if (p.folder) {
-                fs::copy(*root / u8path(p.from), s.staged, fs::copy_options::recursive, ec);
-            }
-            else {
-                fs::copy_file(*root / u8path(p.from), s.staged, ec);
-            }
-            if (ec) {
-                const std::string why = ec.message();
-                swaps.push_back(s);
-                roll_back(swaps);
-                return finish(Outcome::Failed, "can't copy " + p.from + ": " + why);
-            }
-            swaps.push_back(s);
-        }
-
-        // 5. Swap in: what is at each destination moves aside first.
-        auto owner_record = [&](const std::string &to) -> const InstalledFile * {
-            if (const InstalledFile *f = record_for(old, to)) {
-                return f;
-            }
-            for (const Entry *e : replaced) {
-                if (const InstalledFile *f = record_for(e, to)) {
-                    return f;
-                }
-            }
-            return nullptr;
+        auto path_of = [&](const json &s, const char *key) {
+            const std::string p = (s.contains(key) && s[key].is_string()) ? s[key].get<std::string>() : std::string();
+            return (!p.empty() && safe_relative_path(p)) ? p : std::string();
         };
-        for (size_t i = 0; i < swaps.size(); i++) {
-            Swap &s = swaps[i];
-            const std::string to = plan.places[i].to;
-            if (fs::exists(s.dst, ec)) {
-                const InstalledFile *rec = owner_record(to);
-                const bool unchanged = rec && file_state(*rec, hash_path(s.dst)) == FileState::Unchanged;
-                if (unchanged) {
-                    s.aside = s.dst;
-                    s.aside += ".replaced";
-                    fs::remove_all(s.aside, ec);
+        const bool committed = j.value("committed", false);
+        std::vector<json> swaps(j["swaps"].begin(), j["swaps"].end());
+        if (committed) {
+            // The registry has the new version: finish the cleanup.
+            for (const json &s : swaps) {
+                const std::string aside = path_of(s, "aside"), staged = path_of(s, "staged");
+                if (!aside.empty() && !s.value("keep_aside", false)) {
+                    fs::remove_all(data_dir / u8path(aside), ec);
                 }
-                else {
-                    // Edited by the player, or put there by hand: kept, never overwritten.
-                    const std::string kept = edited_name(to, options.date, [&](const std::string &n) {
-                        std::error_code e;
-                        return fs::exists(data_dir / u8path(n), e);
-                    });
-                    s.aside = data_dir / u8path(kept);
-                    s.keep_aside = true;
-                }
-                ec.clear();
-                fs::rename(s.dst, s.aside, ec);
-                if (ec) {
-                    const std::string why = ec.message();
-                    s.aside.clear();
-                    roll_back(swaps);
-                    return finish(Outcome::Failed, "can't move " + to + " aside: " + why);
+                if (!staged.empty()) {
+                    fs::remove_all(data_dir / u8path(staged), ec);
                 }
             }
-            ec.clear();
-            fs::rename(s.staged, s.dst, ec);
-            if (ec) {
-                const std::string why = ec.message();
-                roll_back(swaps);
-                return finish(Outcome::Failed, "can't install " + to + ": " + why);
+            if (j.contains("delete") && j["delete"].is_array()) {
+                for (const json &d : j["delete"]) {
+                    if (d.is_string() && safe_relative_path(d.get<std::string>())) {
+                        fs::remove_all(data_dir / u8path(d.get<std::string>()), ec);
+                    }
+                }
             }
-            s.done = true;
         }
-
-        // 6. The new registry entry (hashes of what was installed).
-        Entry entry;
-        entry.id = m.id;
-        entry.kind = m.kind;
-        entry.version = m.version;
-        entry.display_name = m.display_name;
-        entry.source = options.source;
-        entry.installed = options.now;
-        for (size_t i = 0; i < swaps.size(); i++) {
-            const std::optional<uint64_t> h = hash_path(swaps[i].dst);
-            if (!h) {
-                roll_back(swaps);
-                return finish(Outcome::Failed, "can't read back " + plan.places[i].to);
-            }
-            entry.files.push_back({ normal_path(plan.places[i].to), *h });
-        }
-
-        // 7. The old version's and the replaced packages' files the new one doesn't use: unedited ones go, edited
-        //    ones stay where they are (now the player's own).
-        std::vector<fs::path> to_delete;
-        auto retire = [&](const Entry *e) {
-            if (!e) {
-                return;
-            }
-            for (const InstalledFile &f : e->files) {
-                const bool reused = std::any_of(entry.files.begin(), entry.files.end(),
-                    [&](const InstalledFile &n) { return lower(n.path) == lower(normal_path(f.path)); });
-                if (reused) {
+        else {
+            // The registry still has the old version: put back what was there (newest swap first).
+            for (auto it = swaps.rbegin(); it != swaps.rend(); ++it) {
+                const std::string dst = path_of(*it, "dst"), staged = path_of(*it, "staged"), aside = path_of(*it, "aside");
+                if (dst.empty()) {
                     continue;
                 }
+                const fs::path d = data_dir / u8path(dst);
+                const bool staged_left = !staged.empty() && fs::exists(data_dir / u8path(staged), ec);
+                if (!aside.empty() && fs::exists(data_dir / u8path(aside), ec)) {
+                    fs::remove_all(d, ec);              // the new copy, if it got placed
+                    fs::rename(data_dir / u8path(aside), d, ec);
+                }
+                else if (aside.empty() && !staged_left) {
+                    fs::remove_all(d, ec);              // nothing was there before: the new copy goes
+                }
+                if (staged_left) {
+                    fs::remove_all(data_dir / u8path(staged), ec);
+                }
+            }
+        }
+        fs::remove(journal, ec);
+        fs::remove(data_dir / WorkFolder, ec);
+        return committed ? "finished an install a crash interrupted" : "undid an install a crash interrupted";
+    }
+
+    InstallResult install(const fs::path &package, const fs::path &data_dir, const InstallOptions &options) {
+        try {
+            return install_impl(package, data_dir, options);
+        }
+        catch (const std::exception &e) {
+            InstallResult r;
+            r.outcome = Outcome::Failed;
+            r.message = std::string("unexpected error: ") + e.what();
+            return r;
+        }
+    }
+
+    RemoveResult uninstall(const std::string &id, const fs::path &data_dir) {
+        RemoveResult result;
+        try {
+            Registry registry;
+            const RegistryStatus status = load_registry(data_dir, registry);
+            if (!may_save(status)) {
+                result.message = "packages.json can't be read; nothing was removed";
+                return result;
+            }
+            const std::optional<Entry> entry = remove(registry, id);
+            if (!entry) {
+                result.message = "\"" + id + "\" isn't an installed package";
+                return result;
+            }
+            std::vector<fs::path> to_delete;
+            for (const InstalledFile &f : entry->files) {
                 const fs::path p = data_dir / u8path(f.path);
                 switch (file_state(f, hash_path(p))) {
                     case FileState::Unchanged: to_delete.push_back(p); break;
@@ -440,135 +718,89 @@ namespace recomp::packages {
                     case FileState::Missing: break;
                 }
             }
-        };
-        retire(old);
-        for (const Entry *e : replaced) {
-            retire(e);
-        }
-
-        Registry updated = registry;
-        for (const std::string &r : plan.replaced) {
-            remove(updated, r);
-        }
-        upsert(updated, entry);
-        if (!save_registry(data_dir, updated)) {
-            roll_back(swaps);
-            return finish(Outcome::Failed, "can't write packages.json; nothing was changed");
-        }
-        for (Swap &s : swaps) {
-            if (!s.aside.empty()) {
-                if (s.keep_aside) {
-                    result.kept.push_back(u8str(s.aside.lexically_relative(data_dir)));
-                }
-                else {
-                    remove_path(s.aside);
-                }
+            if (!save_registry(data_dir, registry)) {
+                result.message = "can't write packages.json; nothing was removed";
+                return result;
             }
-        }
-        for (const fs::path &p : to_delete) {
-            remove_path(p);
-        }
-
-        const std::string name = m.display_name + " " + m.version;
-        std::string kept_note;
-        if (!result.kept.empty()) {
-            kept_note = " (" + std::to_string(result.kept.size()) + " of your edited files kept)";
-        }
-        switch (plan.action) {
-            case Action::Upgrade: return finish(Outcome::Upgraded, "updated " + m.display_name + " " + plan.old_version + " -> " + m.version + kept_note);
-            case Action::Reinstall: return finish(Outcome::Reinstalled, "reinstalled " + name + kept_note);
-            case Action::Downgrade: return finish(Outcome::Downgraded, "went back to " + name + " (from " + plan.old_version + ")" + kept_note);
-            default: return finish(Outcome::Installed, std::string("installed ") + name + " (" + kind_name(m.kind) + ")" + kept_note);
-        }
-    }
-
-    RemoveResult uninstall(const std::string &id, const fs::path &data_dir) {
-        RemoveResult result;
-        Registry registry;
-        const RegistryStatus status = load_registry(data_dir, registry);
-        if (!may_save(status)) {
-            result.message = "packages.json can't be read; nothing was removed";
-            return result;
-        }
-        const std::optional<Entry> entry = remove(registry, id);
-        if (!entry) {
-            result.message = "\"" + id + "\" isn't an installed package";
-            return result;
-        }
-        std::vector<fs::path> to_delete;
-        for (const InstalledFile &f : entry->files) {
-            const fs::path p = data_dir / u8path(f.path);
-            switch (file_state(f, hash_path(p))) {
-                case FileState::Unchanged: to_delete.push_back(p); break;
-                case FileState::Edited: result.kept.push_back(f.path); break;
-                case FileState::Missing: break;
+            for (const fs::path &p : to_delete) {
+                remove_path(p);
             }
+            result.removed = true;
+            result.message = "removed " + (entry->display_name.empty() ? entry->id : entry->display_name) +
+                (result.kept.empty() ? std::string() : " (" + std::to_string(result.kept.size()) + " edited files kept)");
         }
-        if (!save_registry(data_dir, registry)) {
-            result.message = "can't write packages.json; nothing was removed";
-            return result;
+        catch (const std::exception &e) {
+            result.removed = false;
+            result.message = std::string("unexpected error: ") + e.what();
         }
-        for (const fs::path &p : to_delete) {
-            remove_path(p);
-        }
-        result.removed = true;
-        result.message = "removed " + (entry->display_name.empty() ? entry->id : entry->display_name) +
-            (result.kept.empty() ? std::string() : " (" + std::to_string(result.kept.size()) + " edited files kept)");
         return result;
     }
 
     std::vector<InstallResult> process_import_folder(const fs::path &data_dir, const InstallOptions &options_in) {
         std::vector<InstallResult> results;
-        const fs::path dir = data_dir / ImportFolder;
-        std::error_code ec;
-        if (!fs::is_directory(dir, ec)) {
-            return results;
-        }
-        InstallOptions options = options_in;
-        options.source = "dropped";
-        std::vector<fs::path> items;
-        for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
-            const std::string name = u8str(it->path().filename());
-            if (name.empty() || name[0] == '.' || name == "not-installed" || name == "last-import.json") {
-                continue;
+        try {
+            if (const std::string recovered = recover_interrupted_install(data_dir); !recovered.empty()) {
+                std::printf("[wcw] packages: %s\n", recovered.c_str());
             }
-            items.push_back(it->path());
-        }
-        if (items.empty()) {
-            return results;
-        }
-        std::sort(items.begin(), items.end());
-        const fs::path rejected = dir / "not-installed";
-        json report = json::array();
-        for (const fs::path &item : items) {
-            InstallResult r = install(item, data_dir, options);
-            const std::string name = u8str(item.filename());
-            const bool done = r.outcome != Outcome::Refused && r.outcome != Outcome::Failed;
-            if (done) {
-                remove_path(item);
+            const fs::path dir = data_dir / ImportFolder;
+            std::error_code ec;
+            if (!fs::is_directory(dir, ec)) {
+                return results;
             }
-            else {
-                fs::create_directories(rejected, ec);
-                const std::string moved = edited_name(name, options.date.empty() ? today_local() : options.date,
-                    [&](const std::string &n) { std::error_code e; return fs::exists(rejected / u8path(n), e); });
-                const fs::path target = fs::exists(rejected / item.filename(), ec) ? rejected / u8path(moved) : rejected / item.filename();
-                fs::rename(item, target, ec);
-                std::string why = r.message + "\n";
-                for (const Problem &p : r.problems) {
-                    why += std::string(p.error ? "error " : "warning ") + (p.field.empty() ? "" : p.field + ": ") + p.message + "\n";
+            InstallOptions options = options_in;
+            options.source = "dropped";
+            if (options.date.empty()) {
+                options.date = today_local();
+            }
+            std::vector<fs::path> items;
+            for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+                const std::string name = u8str(it->path().filename());
+                if (name.empty() || name[0] == '.' || name == "not-installed" || name == "last-import.json") {
+                    continue;
                 }
-                write_small_file(target.parent_path() / u8path(u8str(target.filename()) + ".txt"), why);
+                items.push_back(it->path());
             }
-            json problems = json::array();
-            for (const Problem &p : r.problems) {
-                problems.push_back({ { "error", p.error }, { "field", p.field }, { "message", p.message } });
+            if (items.empty()) {
+                return results;
             }
-            report.push_back({ { "file", name }, { "outcome", outcome_name(r.outcome) }, { "id", r.id },
-                { "name", r.display_name }, { "version", r.version }, { "message", r.message }, { "problems", problems } });
-            std::printf("[wcw] import %s: %s (%s)\n", name.c_str(), outcome_name(r.outcome), r.message.c_str());
-            results.push_back(std::move(r));
+            std::sort(items.begin(), items.end());
+            const fs::path rejected = dir / "not-installed";
+            json report = json::array();
+            for (const fs::path &item : items) {
+                InstallResult r = install(item, data_dir, options);
+                const std::string name = u8str(item.filename());
+                const bool done = r.outcome != Outcome::Refused && r.outcome != Outcome::Failed;
+                if (done) {
+                    remove_path(item);
+                }
+                else {
+                    fs::create_directories(rejected, ec);
+                    const std::string target_name = edited_name(name, options.date, [&](const std::string &n) {
+                        std::error_code e;
+                        return fs::exists(rejected / u8path(n), e);
+                    });
+                    const fs::path target = fs::exists(rejected / item.filename(), ec) ? rejected / u8path(target_name) : rejected / item.filename();
+                    fs::rename(item, target, ec);
+                    std::string why = r.message + "\n";
+                    for (const Problem &p : r.problems) {
+                        why += std::string(p.error ? "error " : "warning ") + (p.field.empty() ? "" : p.field + ": ") + p.message + "\n";
+                    }
+                    write_small_file(target.parent_path() / u8path(u8str(target.filename()) + ".txt"), why);
+                }
+                json problems = json::array();
+                for (const Problem &p : r.problems) {
+                    problems.push_back({ { "error", p.error }, { "field", p.field }, { "message", p.message } });
+                }
+                report.push_back({ { "file", name }, { "outcome", outcome_name(r.outcome) }, { "id", r.id },
+                    { "name", r.display_name }, { "version", r.version }, { "message", r.message }, { "problems", problems } });
+                std::printf("[wcw] import %s: %s (%s)\n", name.c_str(), outcome_name(r.outcome), r.message.c_str());
+                results.push_back(std::move(r));
+            }
+            write_small_file(dir / "last-import.json", dump(json{ { "format", 1 }, { "results", report } }));
         }
-        write_small_file(dir / "last-import.json", json{ { "format", 1 }, { "results", report } }.dump(2) + "\n");
+        catch (const std::exception &e) {
+            std::printf("[wcw] import: unexpected error: %s\n", e.what());
+        }
         return results;
     }
 }
