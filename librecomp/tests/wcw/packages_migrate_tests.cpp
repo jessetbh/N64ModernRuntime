@@ -6,6 +6,7 @@
 // Built and run as part of every librecomp build (LIBRECOMP_WCW_TESTS); a failure fails the build.
 
 #include "librecomp/packages.hpp"
+#include "librecomp/conversion.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -84,7 +85,8 @@ namespace {
         write(data / "mods" / "models" / "q-robot.akimodel" / "pack.json", "{\"id\": \"q-robot\", \"version\": \"1.3.0\", \"name\": \"Robot\"}");
         write(data / "mods" / "models" / "mine.akimodel" / "pack.json", "{\"id\": \"mine\"}");
         write(data / "mods" / "models" / ".bundled", "q-robot.akimodel\n");
-        write(data / "conversions" / "aew64" / "aki.json", "{\"format\": \"aki-conversion\", \"format_version\": 1, \"id\": \"aew64\", \"name\": \"AEW 64\", \"version\": \"1.0.0\"}");
+        write(data / "conversions" / "aew64" / "aki.json", "{\"format\": \"aki-conversion\", \"format_version\": 1, \"id\": \"aew64\", \"name\": \"AEW 64\", "
+            "\"version\": \"1.0.0\", \"components\": {\"patch\": {\"file\": \"patch.nrm\"}}}");
         write(data / "conversions" / "_packages" / "shared.rtz", "x");
         write(data / "saves" / "nmp_hack" / "slot.sram", "save");
         write(data / "mods.json", "{\"enabled_mods\": [\"aki_camera\", \"nmp_hack\", \"nm_unlocked\"], \"mod_order\": [\"nmp_hack\", \"aki_camera\", \"nm_unlocked\"]}");
@@ -105,6 +107,11 @@ TEST_CASE("migrate: patch hacks become conversions, the first enabled one is cho
     CHECK(aki["game"] == "nomercy" && aki["version"] == "2.1.0");
     CHECK(aki["components"]["patch"]["file"] == "patch.nrm");
     CHECK(aki["base_rom"]["sha1"] == "0123456789ABCDEF0123456789ABCDEF01234567");
+    // The runtime's own loader accepts it (what decides whether the hack still plays).
+    recomp::mods::conversion::Conversion c;
+    std::string why;
+    CHECK(recomp::mods::conversion::parse(read(data / "conversions" / "nmp_hack" / "aki.json"), "nmp_hack", c, why));
+    CHECK(c.has_patch);
     CHECK(r.chosen == "nmp_hack");                              // first in mod order
     CHECK(r.also_enabled == std::vector<std::string>{ "nm_unlocked" });
     CHECK(read(data / "conversions" / "active.txt") == "nmp_hack\n");
@@ -125,11 +132,10 @@ TEST_CASE("migrate: what is installed is recorded; bad ids stay manual; the mark
     CHECK(kind_of("aew64") == "conversion");
     CHECK(kind_of("arena") == "texture-pack");
     CHECK(kind_of("loose_pack") == "texture-pack");
-    CHECK(kind_of("q-robot") == "model-pack");
     CHECK(kind_of("mine") == "model-pack");
     CHECK(kind_of("Bad_Id") == "-");                            // not a package id: stays a manual install
     CHECK(!find(reg, "_packages") && !find(reg, "models"));
-    CHECK(find(reg, "q-robot")->source == "bundled");
+    CHECK(!find(reg, "q-robot"));                               // the game's own starter pack: not recorded
     CHECK(find(reg, "mine")->source == "migrated" && find(reg, "mine")->version == "0.0.0");
     CHECK(find(reg, "aki_camera")->version == "0.7.0");
     CHECK(find(reg, "nmp_hack")->files[0].path == "conversions/nmp_hack");
@@ -184,4 +190,53 @@ TEST_CASE("migrate: an empty data folder just gets the marker") {
     const MigrateReport r = migrate(t.path, opts());
     CHECK(r.ran && r.recorded.empty() && r.moved.empty());
     CHECK(migration_done(t.path));
+}
+
+// Step 3 review findings.
+
+TEST_CASE("migrate: a wrong-typed field doesn't stop the run; the choice is still written") {
+    TempDir t;
+    const fs::path data = t.path / "data";
+    make_zip(data / "mods" / "a_bad.nrm", { { "mod.json", "{\"id\": \"a_bad\", \"version\": 1, \"display_name\": null}" }, { "patch.bps", "x" } });
+    make_zip(data / "mods" / "b_hack.nrm", { { "mod.json", mod_json("b_hack", "1.0.0") }, { "patch.bps", "y" } });
+    make_zip(data / "mods" / "c_addon.nrm", { { "mod.json", "{\"id\": \"c_addon\", \"version\": [1]}" }, { "mod_binary.bin", "code" } });
+    write(data / "conversions" / "d_conv" / "aki.json", "{\"format\": \"aki-conversion\", \"name\": 5, \"version\": {}}");
+    write(data / "mods.json", "{\"enabled_mods\": [\"b_hack\"], \"mod_order\": [\"b_hack\"]}");
+    const MigrateReport r = migrate(data, opts());
+    CHECK(r.ran);
+    CHECK(std::find(r.moved.begin(), r.moved.end(), "b_hack") != r.moved.end());
+    CHECK(r.chosen == "b_hack");
+    CHECK(read(data / "conversions" / "active.txt") == "b_hack\n");
+    Registry reg;
+    load_registry(data, reg);
+    CHECK(find(reg, "c_addon") && find(reg, "c_addon")->version == "0.0.0");
+    CHECK(find(reg, "d_conv"));
+    CHECK(migration_done(data));
+}
+
+TEST_CASE("migrate: file names inside a zip are case-sensitive, like the runtime") {
+    TempDir t;
+    const fs::path data = t.path / "data";
+    make_zip(data / "mods" / "odd.nrm", { { "mod.json", mod_json("odd", "1.0.0") }, { "Patch.bps", "x" } });   // not a patch mod to the runtime
+    const MigrateReport r = migrate(data, opts());
+    CHECK(r.moved.empty());
+    CHECK(fs::exists(data / "mods" / "odd.nrm"));
+}
+
+TEST_CASE("migrate: the game's bundled files aren't recorded; the log is appended") {
+    TempDir t;
+    const fs::path data = t.path / "data";
+    populate(data);
+    write(data / MigrationLog, "earlier line\n");
+    MigrateOptions o = opts();
+    o.bundled_names = { "aki_camera.nrm", "arena.rtz" };
+    migrate(data, o);
+    Registry reg;
+    load_registry(data, reg);
+    CHECK(!find(reg, "aki_camera"));
+    CHECK(!find(reg, "arena"));
+    CHECK(find(reg, "loose_pack"));
+    const std::string log = read(data / MigrationLog);
+    CHECK(log.rfind("earlier line\n", 0) == 0);
+    CHECK(log.find("package migration") != std::string::npos);
 }

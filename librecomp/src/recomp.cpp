@@ -150,6 +150,29 @@ namespace recomp::mods {
     std::string active_conversion_cheats_mod();
 }
 
+// [wcw] The file names a game installs into mods/ from assets/mods next to its executable (install_bundled_mods).
+// Migration doesn't record them (aki-roadmap#154): the game rewrites them on update.
+static std::vector<std::string> bundled_mod_names() {
+    std::vector<std::string> names;
+    std::filesystem::path exe;
+#ifdef _WIN32
+    wchar_t buf[32768];
+    const DWORD n = GetModuleFileNameW(nullptr, buf, DWORD(std::size(buf)));
+    if (n > 0 && n < std::size(buf)) {
+        exe = std::filesystem::path(std::wstring(buf, n));
+    }
+#else
+    std::error_code exe_ec;
+    exe = std::filesystem::read_symlink("/proc/self/exe", exe_ec);
+#endif
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(exe.parent_path() / "assets" / "mods", ec), end; !exe.empty() && !ec && it != end; it.increment(ec)) {
+        const std::u8string name = it->path().filename().u8string();
+        names.emplace_back(name.begin(), name.end());
+    }
+    return names;
+}
+
 void recomp::mods::scan_mods() {
     // [wcw] aki-roadmap#154: finish or undo an install a crash interrupted, then install the packages dropped in
     // <data>/import, before the mod folder is scanned so they load in this session. Once per run: the Mods menu
@@ -173,6 +196,7 @@ void recomp::mods::scan_mods() {
             recomp::packages::MigrateOptions migrate_options;
             migrate_options.game_id = game.mod_game_id;
             migrate_options.rom_sha1 = rom_sha1;
+            migrate_options.bundled_names = bundled_mod_names();
             for (const std::string &line : recomp::packages::migrate(config_path, migrate_options).lines) {
                 printf("[wcw] packages: %s\n", line.c_str());
             }

@@ -290,6 +290,10 @@ namespace recomp {
             std::string rom_sha1;       // the player's ROM, lower-case hex, for a migrated hack's base_rom ("" = left out)
             std::string now;            // UTC ISO 8601 ("" = now)
             bool dry_run = false;       // work out and log what would happen; change nothing, write no marker
+            // File names the game itself installs into mods/ from its assets/mods (install_bundled_mods). They are
+            // not recorded: the game rewrites them on update, so a recorded hash would go stale. Bundled model packs
+            // (mods/models/.bundled) are skipped the same way; both become packages later (aki-roadmap#154 step 7).
+            std::vector<std::string> bundled_names;
         };
         struct MigrateReport {
             bool ran = false;                   // false: already migrated, or the registry can't be written
@@ -307,12 +311,13 @@ namespace recomp {
         //    Their saves are already in saves/<mod id>/, which is the conversion's save folder. If mods.json had any
         //    enabled, the first (in mod order) becomes conversions/active.txt (unless a choice exists) and the rest
         //    are listed: only one hack runs at a time now.
-        // 2. What is already installed is recorded in the registry with its current hash (source "migrated", or
-        //    "bundled" for starter packs mods/models/.bundled names), so a package can upgrade it later: code add-ons
+        // 2. What is already installed is recorded in the registry with its current hash (source "migrated"; the
+        //    game's own bundled files are skipped, see bundled_names), so a package can upgrade it later: code add-ons
         //    and patch .nrm, texture packs (.rtz or a folder with rt64.json), model packs (mods/models/*.akimodel) and
         //    conversions (conversions/<id> with aki.json). Ids that aren't valid package ids, or that another kind
         //    already holds, stay unrecorded ("manual") and are logged.
-        // 3. The log goes to migration.log and the marker is written. Nothing is deleted. Never throws.
+        // 3. The log is appended to migration.log (also when the registry can't be saved), then the marker is
+        //    written. Nothing is deleted. Never throws; one unreadable item is logged and skipped.
         MigrateReport migrate(const std::filesystem::path &data_dir, const MigrateOptions &options);
     }
 }

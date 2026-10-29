@@ -102,9 +102,10 @@ namespace recomp::packages {
             if (mz_zip_reader_init_cfile(&a, f, 0, 0)) {
                 info.ok = true;
                 mz_uint index;
-                info.patch = mz_zip_reader_locate_file_v2(&a, "patch.bps", nullptr, 0, &index);
-                info.binary = mz_zip_reader_locate_file_v2(&a, "mod_binary.bin", nullptr, 0, &index);
-                if (mz_zip_reader_locate_file_v2(&a, "mod.json", nullptr, 0, &index)) {
+                // Case-sensitive, as the runtime's mod loader looks them up (mod_manifest.cpp).
+                info.patch = mz_zip_reader_locate_file_v2(&a, "patch.bps", nullptr, MZ_ZIP_FLAG_CASE_SENSITIVE, &index);
+                info.binary = mz_zip_reader_locate_file_v2(&a, "mod_binary.bin", nullptr, MZ_ZIP_FLAG_CASE_SENSITIVE, &index);
+                if (mz_zip_reader_locate_file_v2(&a, "mod.json", nullptr, MZ_ZIP_FLAG_CASE_SENSITIVE, &index)) {
                     mz_zip_archive_file_stat st;
                     if (mz_zip_reader_file_stat(&a, index, &st) && st.m_uncomp_size < (1u << 20)) {
                         std::string text(size_t(st.m_uncomp_size), '\0');
@@ -119,6 +120,15 @@ namespace recomp::packages {
             return info;
         }
 
+        // A string field, or fallback when it's missing or not a string (json::value throws on a wrong type).
+        std::string str(const json &j, const char *key, const std::string &fallback = std::string()) {
+            if (!j.is_object()) {
+                return fallback;
+            }
+            const auto it = j.find(key);
+            return (it != j.end() && it->is_string()) ? it->get<std::string>() : fallback;
+        }
+
         struct ModFields {
             std::string id, name, version;
             std::vector<std::string> authors;
@@ -129,9 +139,9 @@ namespace recomp::packages {
             if (j.is_discarded() || !j.is_object()) {
                 return m;
             }
-            m.id = j.value("id", std::string());
-            m.name = j.value("display_name", m.id);
-            m.version = j.value("version", std::string());
+            m.id = str(j, "id");
+            m.name = str(j, "display_name", m.id);
+            m.version = str(j, "version");
             if (const auto a = j.find("authors"); a != j.end() && a->is_array()) {
                 for (const json &v : *a) {
                     if (v.is_string()) {
@@ -210,7 +220,7 @@ namespace recomp::packages {
             }
             ec.clear();
             std::sort(nrms.begin(), nrms.end());
-            for (const fs::path &nrm : nrms) {
+            for (const fs::path &nrm : nrms) try {
                 const ZipInfo z = inspect_zip(nrm);
                 if (!z.ok || !z.patch || z.binary) {
                     continue;
@@ -250,16 +260,21 @@ namespace recomp::packages {
                 }
                 fs::create_directories(target, ec);
                 ec.clear();
-                fs::rename(nrm, target / "patch.nrm", ec);
-                if (ec) {
-                    log("  couldn't move it (" + ec.message() + "); left in mods");
+                const bool written = write_text(target / "aki.json", aki.dump(2, ' ', false, json::error_handler_t::replace) + "\n");
+                if (written) {
+                    fs::rename(nrm, target / "patch.nrm", ec);
+                }
+                if (!written || ec) {
+                    log("  couldn't move it (" + (written ? ec.message() : std::string("can't write aki.json")) + "); left in mods");
                     std::error_code e;
                     fs::remove_all(target, e);
                     report.moved.pop_back();
                     std::erase(moved_enabled_order, f.id);
                     continue;
                 }
-                write_text(target / "aki.json", aki.dump(2, ' ', false, json::error_handler_t::replace) + "\n");
+            }
+            catch (const std::exception &e) {
+                log("skipped " + u8str(nrm.filename()) + ": " + e.what());
             }
             // The order the hacks had in mods.json decides which one runs next; enabled ones keep running.
             std::sort(moved_enabled_order.begin(), moved_enabled_order.end(), [&](const std::string &a, const std::string &b) {
@@ -274,7 +289,8 @@ namespace recomp::packages {
                 else {
                     report.chosen = moved_enabled_order.front();
                     report.also_enabled.assign(moved_enabled_order.begin() + 1, moved_enabled_order.end());
-                    log("the next start plays " + report.chosen + " (it was enabled)");
+                    log("the next start plays " + report.chosen + " (it was enabled); while a conversion plays, your other "
+                        "add-ons stay off for now");
                     if (!report.also_enabled.empty()) {
                         std::string rest;
                         for (const std::string &id : report.also_enabled) {
@@ -290,10 +306,11 @@ namespace recomp::packages {
             }
 
             // 2. Record what is installed.
+            const std::set<std::string> bundled_names(options.bundled_names.begin(), options.bundled_names.end());
             const std::set<std::string> bundled_packs = recomp::mods::bundled_packs::parse_record(
                 read_text(mods / "models" / recomp::mods::bundled_packs::RecordFile));
             auto record = [&](const std::string &id, Kind kind, const std::string &version, const std::string &name,
-                const std::string &rel, const std::string &source) {
+                const std::string &rel, const std::string &source) { try {
                 if (!valid_id(id)) {
                     log("not recorded (stays a manual install): " + rel + " (id \"" + id + "\" isn't a package id)");
                     return;
@@ -307,7 +324,8 @@ namespace recomp::packages {
                     return;
                 }
                 std::optional<uint64_t> h = hash_path(data_dir / u8path(rel));
-                if (!h && options.dry_run) {
+                if (!h && options.dry_run && kind == Kind::Conversion &&
+                    std::find(report.moved.begin(), report.moved.end(), id) != report.moved.end()) {
                     h = 0;   // a hack that would have moved here
                 }
                 if (!h) {
@@ -325,7 +343,10 @@ namespace recomp::packages {
                 upsert(registry, e);
                 report.recorded.push_back(id);
                 log("recorded " + std::string(kind_name(kind)) + " " + id + " " + e.version + " (" + rel + ")");
-            };
+            }
+            catch (const std::exception &e) {
+                log("not recorded: " + rel + " (" + e.what() + ")");
+            } };
             auto owned = [&](const std::string &rel) { return !owner_of(registry, rel).empty(); };
 
             // Conversions (the moved hacks included).
@@ -352,11 +373,11 @@ namespace recomp::packages {
                 }
                 const json aki = json::parse(read_text(dir / "aki.json"), nullptr, false);
                 const bool moved = std::find(report.moved.begin(), report.moved.end(), id) != report.moved.end();
-                if (!moved && (aki.is_discarded() || !aki.is_object() || aki.value("format", std::string()) != "aki-conversion")) {
+                if (!moved && str(aki, "format") != "aki-conversion") {
                     continue;   // not a conversion folder
                 }
-                const std::string version = aki.is_object() ? aki.value("version", std::string()) : std::string();
-                const std::string name = aki.is_object() ? aki.value("name", id) : id;
+                const std::string version = str(aki, "version");
+                const std::string name = str(aki, "name", id);
                 record(id, Kind::Conversion, version, name, rel, "migrated");
             }
 
@@ -372,11 +393,17 @@ namespace recomp::packages {
             for (const fs::path &item : mod_items) {
                 const std::string file = u8str(item.filename());
                 const std::string rel = "mods/" + file;
-                if (owned(rel)) {
-                    continue;
+                if (owned(rel) || bundled_names.count(file)) {
+                    continue;   // bundled: the game's own copy, rewritten on update
                 }
                 std::error_code e;
                 const std::string ext = lower(u8str(item.extension()));
+                if (options.dry_run && ext == ".nrm") {
+                    const ZipInfo z = inspect_zip(item);
+                    if (std::find(report.moved.begin(), report.moved.end(), mod_fields(z.mod_json).id) != report.moved.end()) {
+                        continue;   // the dry run's moved hack: it wouldn't be in mods any more
+                    }
+                }
                 if (fs::is_regular_file(item, e) && ext == ".nrm") {
                     const ZipInfo z = inspect_zip(item);
                     if (!z.ok) {
@@ -415,10 +442,11 @@ namespace recomp::packages {
                 }
                 const json pj = json::parse(read_text(pack / "pack.json"), nullptr, false);
                 const std::string stem = u8str(pack.stem());
-                const std::string id = (pj.is_object() && pj.contains("id") && pj["id"].is_string()) ? pj["id"].get<std::string>() : stem;
-                const std::string version = pj.is_object() ? pj.value("version", std::string()) : std::string();
-                const std::string name = pj.is_object() ? pj.value("name", id) : id;
-                record(id, Kind::ModelPack, version, name, rel, bundled_packs.count(file) ? "bundled" : "migrated");
+                if (bundled_packs.count(file)) {
+                    continue;   // the game's own starter pack (bundled_packs keeps it up to date)
+                }
+                const std::string id = str(pj, "id", stem);
+                record(id, Kind::ModelPack, str(pj, "version"), str(pj, "name", id), rel, "migrated");
             }
 
             // 3. Save, log, mark.
@@ -426,16 +454,19 @@ namespace recomp::packages {
                 log("(dry run: nothing was changed)");
                 return report;
             }
-            if (!save_registry(data_dir, registry)) {
+            const bool saved = save_registry(data_dir, registry);
+            if (!saved) {
                 log("couldn't write packages.json; migration will run again at the next start");
-                return report;
             }
-            std::string text;
+            std::string text = read_text(data_dir / MigrationLog);   // appended: a rerun keeps what moved before
+            text += "[" + now + "] package migration\n";
             for (const std::string &line : report.lines) {
                 text += line + "\n";
             }
-            write_text(data_dir / MigrationLog, "[" + now + "] package migration\n" + text);
-            write_text(data_dir / MigrationMarker, "1\n");
+            write_text(data_dir / MigrationLog, text);
+            if (saved) {
+                write_text(data_dir / MigrationMarker, "1\n");
+            }
             return report;
         }
     }
