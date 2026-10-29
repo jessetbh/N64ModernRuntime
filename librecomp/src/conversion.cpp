@@ -24,6 +24,8 @@ namespace {
     // The session's conversion, decided once (aki-roadmap#57): the mod scan and the save folder both use it.
     bool session_decided = false;
     recomp::mods::conversion::StartupChoice session_choice;
+    // A Mods-menu choice's aki.json as checked when the session was decided, so the load can't fail on a second read.
+    std::optional<recomp::mods::conversion::Conversion> session_checked;
     std::string choice_notice; // why a Mods-menu choice couldn't run (logged at the mod scan, shown by the Mods menu)
 
     std::string read_text(const std::filesystem::path &path) {
@@ -61,23 +63,13 @@ namespace recomp::mods {
         }
 
         const std::string id = session_choice.id;
-        std::string reason;
-        if (!conversion::valid_id(id)) {
-            reason = "\"" + id + "\" is not a valid conversion id";
+        conversion::Conversion c;
+        const std::string reason = conversion::check_choice(id, conversion::valid_id(id) ?
+            read_text(config_path / conversion::Folder / id / conversion::ManifestFile) : std::string(), c);
+        if (reason.empty()) {
+            session_checked = std::move(c);
         }
         else {
-            const std::string text = read_text(config_path / conversion::Folder / id / conversion::ManifestFile);
-            conversion::Conversion c;
-            std::string error;
-            if (text.empty()) {
-                reason = "it isn't installed any more";
-            }
-            else if (!conversion::parse(text, id, c, error)) {
-                reason = error;
-            }
-        }
-
-        if (!reason.empty()) {
             choice_notice = "The conversion chosen in the Mods menu (" + id + ") can't run: " + reason +
                 ". The game starts normally with your own saves, and the choice was cleared.";
             std::error_code ec;
@@ -97,6 +89,17 @@ namespace recomp::mods {
         }
 
         return decide_session(config_path).id;
+    }
+
+    bool session_conversion_from_launcher() {
+        std::lock_guard lock(conversion_mutex);
+        const std::filesystem::path config_path = recomp::get_config_path();
+        if (config_path.empty()) {
+            const char *env = std::getenv(conversion::EnvVar);
+            return (env != nullptr) && (env[0] != '\0');
+        }
+
+        return decide_session(config_path).from_launcher;
     }
 
     std::string conversion_choice_notice() {
@@ -129,16 +132,22 @@ namespace recomp::mods {
 
         std::filesystem::create_directories(folder, ec);
         const std::filesystem::path temp = folder / (std::string(conversion::ChoiceFile) + ".tmp");
+        bool written;
         {
             std::ofstream out(temp, std::ios::binary | std::ios::trunc);
             out << id << "\n";
-            if (!out.good()) {
-                return false;
-            }
+            out.close();
+            written = !out.fail();
         }
 
-        std::filesystem::rename(temp, file, ec);
-        return !ec;
+        if (written) {
+            std::filesystem::rename(temp, file, ec);
+        }
+        if (!written || ec) {
+            std::filesystem::remove(temp, ec);
+            return false;
+        }
+        return true;
     }
 
     std::vector<InstalledConversion> list_installed_conversions() {
@@ -149,15 +158,18 @@ namespace recomp::mods {
         }
 
         std::error_code ec;
-        for (const auto &entry : std::filesystem::directory_iterator(config_path / conversion::Folder, ec)) {
-            if (!entry.is_directory(ec)) {
+        std::filesystem::directory_iterator it(config_path / conversion::Folder, ec);
+        for (; !ec && (it != std::filesystem::directory_iterator()); it.increment(ec)) {
+            const std::filesystem::directory_entry &entry = *it;
+            std::error_code entry_ec;
+            if (!entry.is_directory(entry_ec)) {
                 continue;
             }
 
             const std::u8string name8 = entry.path().filename().u8string();
             const std::string id(reinterpret_cast<const char *>(name8.data()), name8.size());
-            if (!conversion::valid_id(id)) {
-                continue; // _packages and other folders that aren't conversions
+            if (id.empty() || (id[0] == '_') || (id[0] == '.')) {
+                continue; // _packages and hidden folders
             }
 
             InstalledConversion installed;
@@ -167,7 +179,13 @@ namespace recomp::mods {
                 continue;
             }
 
-            if (!conversion::parse(text, id, installed.conversion, installed.error)) {
+            if (!conversion::valid_id(id)) {
+                // Listed rather than skipped, so a wrongly named folder (AEW64) doesn't just go missing.
+                installed.error = "its folder name isn't a conversion id (lowercase letters, digits, '_', '.' and '-')";
+                installed.conversion.id = id;
+                installed.conversion.name = id;
+            }
+            else if (!conversion::parse(text, id, installed.conversion, installed.error)) {
                 installed.conversion.id = id;
                 installed.conversion.name = id;
             }
@@ -200,17 +218,22 @@ namespace recomp::mods {
             return {};
         }
 
-        if (!conversion::valid_id(id)) {
-            refuse(std::string(conversion::EnvVar) + "=" + id + " is not a valid conversion id.");
-        }
-
         const std::filesystem::path folder = config_path / conversion::Folder / id;
-        const std::string text = read_text(folder / conversion::ManifestFile);
         conversion::Conversion c;
-        std::string error;
-        if (text.empty() || !conversion::parse(text, id, c, error)) {
-            refuse("Can't start conversion \"" + std::string(id) + "\": " + (text.empty() ? std::string("it isn't installed (no ") +
-                (folder / conversion::ManifestFile).string() + ")" : error) + ".");
+        if (session_checked) {
+            c = *session_checked; // a Mods-menu choice, checked by decide_session
+        }
+        else {
+            if (!conversion::valid_id(id)) {
+                refuse(std::string(conversion::EnvVar) + "=" + id + " is not a valid conversion id.");
+            }
+
+            const std::string text = read_text(folder / conversion::ManifestFile);
+            std::string error;
+            if (text.empty() || !conversion::parse(text, id, c, error)) {
+                refuse("Can't start conversion \"" + std::string(id) + "\": " + (text.empty() ? std::string("it isn't installed (no ") +
+                    (folder / conversion::ManifestFile).string() + ")" : error) + ".");
+            }
         }
 
         std::vector<std::filesystem::path> folders{ folder };

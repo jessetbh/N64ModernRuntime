@@ -76,6 +76,10 @@ namespace recomp {
             };
             StartupChoice choose_startup(const char *env_value, const std::string &choice_file_text);
 
+            // Why a lenient (Mods-menu) choice can't run, "" when it can (out is then its parsed aki.json). manifest_text:
+            // the text of <config>/conversions/<id>/aki.json, "" when it isn't installed.
+            std::string check_choice(const std::string &id, const std::string &manifest_text, Conversion &out);
+
             // Whether codes written for codes_rom may run on this port: the same game (the cheats engine translates another
             // revision's addresses itself); "" (unknown) and other games are refused.
             bool codes_runnable(const std::string &codes_rom, const std::string &port_rom);
@@ -85,6 +89,9 @@ namespace recomp {
         const conversion::Conversion *active_conversion();
         // Its id ("" = none), decided once per session (conversion::choose_startup); the save folder follows it.
         std::string session_conversion_id();
+        // Whether AKI Launcher picked it (AKI_CONVERSION): a restart from the launcher passes the same id again, so a
+        // Mods-menu choice only applies to starts without it.
+        bool session_conversion_from_launcher();
 
         // The Mods menu's conversion picker (aki-roadmap#57). An installed conversion: its parsed aki.json, or error set
         // (id and name are then the folder name).

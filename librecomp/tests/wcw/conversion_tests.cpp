@@ -158,6 +158,18 @@ TEST_CASE("conversion: no launcher id and an empty or blank choice file mean no 
     CHECK(!choose_startup(nullptr, "").from_launcher);
 }
 
+TEST_CASE("conversion: a Mods-menu choice that can't run says why, so the game starts normally instead (#57)") {
+    Conversion c;
+    CHECK(check_choice("nomercy_unlocked", Full, c).empty());
+    CHECK(c.id == "nomercy_unlocked" && c.has_patch);
+    CHECK(check_choice("../aew64", Full, c) == "\"../aew64\" is not a valid conversion id");
+    CHECK(check_choice("C:", Full, c) == "\"C:\" is not a valid conversion id");
+    CHECK(check_choice("aew64", "", c) == "it isn't installed any more");
+    CHECK(!check_choice("aew64", "not json", c).empty());
+    // The folder's aki.json names another id.
+    CHECK(!check_choice("aew64", Full, c).empty());
+}
+
 TEST_CASE("conversion codes: grammar, tags and what is ignored") {
     std::vector<codes::Code> out;
     codes::Report r;

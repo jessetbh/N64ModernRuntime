@@ -130,6 +130,21 @@ namespace recomp::mods::conversion {
         return choice;
     }
 
+    std::string check_choice(const std::string &id, const std::string &manifest_text, Conversion &out) {
+        if (!valid_id(id)) {
+            return "\"" + id + "\" is not a valid conversion id";
+        }
+        if (manifest_text.empty()) {
+            return "it isn't installed any more";
+        }
+
+        std::string error;
+        if (!parse(manifest_text, id, out, error)) {
+            return error;
+        }
+        return {};
+    }
+
     bool resolve_save_subfolder(const char *env_value, const std::string &patch_mod_id, std::string &out) {
         if ((env_value == nullptr) || (env_value[0] == '\0')) {
             out = patch_mod_id;
