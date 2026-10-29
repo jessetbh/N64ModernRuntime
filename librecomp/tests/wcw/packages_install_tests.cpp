@@ -431,3 +431,20 @@ TEST_CASE("install: a stale .replaced is never put back") {
     CHECK(read(data / "mods" / "cam.nrm") == "v2");
     CHECK(!fs::exists(data / "mods" / "cam.nrm.replaced"));
 }
+
+TEST_CASE("install: a committed-by-token recovery deletes the old files; a lone unpack folder is cleared") {
+    TempDir t;
+    const fs::path data = t.path / "data";
+    write(data / "mods" / "new.nrm", "new");
+    write(data / "mods" / "old.nrm", "old version's file");
+    write(data / RegistryFile, "{\"format\": 1, \"packages\": [{\"id\": \"a\", \"kind\": \"addon\", \"version\": \"2.0.0\","
+        " \"install_token\": \"00000000000000bb\", \"files\": [{\"path\": \"mods/new.nrm\", \"hash\": \"0000000000000001\"}]}]}");
+    write(data / ".aki-work" / "install-journal.json", "{\"format\": 1, \"id\": \"a\", \"token\": \"00000000000000bb\", \"committed\": false,"
+        " \"delete\": [\"mods/old.nrm\"], \"swaps\": [{\"dst\": \"mods/new.nrm\", \"staged\": \"mods/new.nrm.installing\", \"aside\": \"\", \"keep_aside\": false}]}");
+    CHECK(recover_interrupted_install(data) == "finished an install a crash interrupted");
+    CHECK(read(data / "mods" / "new.nrm") == "new");
+    CHECK(!fs::exists(data / "mods" / "old.nrm"));
+    write(data / ".aki-work" / "unpack-00000000000000cc" / "part.bin", "x");   // a crash while unpacking: no journal
+    CHECK(!recover_interrupted_install(data).empty());
+    CHECK(!fs::exists(data / ".aki-work"));
+}

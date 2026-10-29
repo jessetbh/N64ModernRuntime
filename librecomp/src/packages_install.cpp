@@ -387,6 +387,10 @@ namespace recomp::packages {
             std::error_code ec;
             if (const std::string recovered = recover_interrupted_install(data_dir); !recovered.empty()) {
                 std::printf("[wcw] packages: %s\n", recovered.c_str());
+                if (fs::exists(data_dir / WorkFolder / JournalFile, ec)) {
+                    return finish(Outcome::Failed, "an earlier interrupted install couldn't be undone yet (a file is in use); "
+                        "close other programs and start the game again");
+                }
             }
 
             // 1. The package folder (a zip is unpacked into a working folder first).
@@ -618,6 +622,8 @@ namespace recomp::packages {
                 remove(updated, r);
             }
             upsert(updated, entry);
+            // The journal gets the delete list first: a crash right after the registry save is then finished with it.
+            write_replacing(journal, dump(journal_json(m.id, token, swaps, to_delete, false)));
             if (!save_registry(data_dir, updated)) {
                 return fail("can't write packages.json; nothing was changed");
             }
@@ -656,7 +662,18 @@ namespace recomp::packages {
         const fs::path journal = data_dir / WorkFolder / JournalFile;
         std::error_code ec;
         if (!fs::exists(journal, ec)) {
-            return {};
+            // Unpack folders a crash left behind (they can be large); no install is running while this is called.
+            bool cleared = false;
+            for (fs::directory_iterator it(data_dir / WorkFolder, ec), end; !ec && it != end; it.increment(ec)) {
+                std::error_code e;
+                if (u8str(it->path().filename()).rfind("unpack-", 0) == 0) {
+                    fs::remove_all(it->path(), e);
+                    cleared = true;
+                }
+            }
+            ec.clear();
+            fs::remove(data_dir / WorkFolder, ec);
+            return cleared ? "removed what an interrupted unpack left behind" : std::string();
         }
         const json j = json::parse(read_small_file(journal), nullptr, false);
         if (j.is_discarded() || !j.is_object() || !j.contains("swaps") || !j["swaps"].is_array()) {
