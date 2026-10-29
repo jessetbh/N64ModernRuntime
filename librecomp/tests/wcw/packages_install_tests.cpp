@@ -394,3 +394,40 @@ TEST_CASE("install: a package holding a link is refused") {
     CHECK(r.outcome == Outcome::Refused);
     CHECK(!fs::exists(data / "mods" / "models" / "q.akimodel"));
 }
+
+// Step 2 re-review findings.
+
+TEST_CASE("install: a registry saved before the journal said committed counts as committed") {
+    TempDir t;
+    const fs::path data = t.path / "data";
+    write(data / "mods" / "a.nrm", "new a");
+    write(data / "mods" / "a.nrm.replaced", "old a");
+    write(data / RegistryFile, "{\"format\": 1, \"packages\": [{\"id\": \"a\", \"kind\": \"addon\", \"version\": \"2.0.0\","
+        " \"install_token\": \"00000000000000aa\", \"files\": [{\"path\": \"mods/a.nrm\", \"hash\": \"0000000000000001\"}]}]}");
+    write(data / ".aki-work" / "install-journal.json", "{\"format\": 1, \"id\": \"a\", \"token\": \"00000000000000aa\", \"committed\": false,"
+        " \"delete\": [], \"swaps\": [{\"dst\": \"mods/a.nrm\", \"staged\": \"mods/a.nrm.installing\", \"aside\": \"mods/a.nrm.replaced\", \"keep_aside\": false}]}");
+    CHECK(recover_interrupted_install(data) == "finished an install a crash interrupted");
+    CHECK(read(data / "mods" / "a.nrm") == "new a");          // not rolled back under the registry's feet
+    CHECK(!fs::exists(data / "mods" / "a.nrm.replaced"));
+}
+
+TEST_CASE("install: a real install records its token; recovery clears stale unpack folders") {
+    TempDir t;
+    const fs::path data = t.path / "data";
+    CHECK(install(make_package(t.path / "p", manifest_json("addon", "cam", "1.0.0", "{\"nrm\": \"cam.nrm\"}"), { { "cam.nrm", "v1" } }), data, opts()).outcome == Outcome::Installed);
+    CHECK(read(data / RegistryFile).find("install_token") != std::string::npos);
+    write(data / ".aki-work" / "unpack-0123456789abcdef" / "big.bin", "x");
+    write(data / ".aki-work" / "install-journal.json", "{\"format\": 1, \"swaps\": []}");
+    CHECK(!recover_interrupted_install(data).empty());
+    CHECK(!fs::exists(data / ".aki-work"));
+}
+
+TEST_CASE("install: a stale .replaced is never put back") {
+    TempDir t;
+    const fs::path data = t.path / "data";
+    CHECK(install(make_package(t.path / "v1", manifest_json("addon", "cam", "1.0.0", "{\"nrm\": \"cam.nrm\"}"), { { "cam.nrm", "v1" } }), data, opts()).outcome == Outcome::Installed);
+    write(data / "mods" / "cam.nrm.replaced", "ancient");    // left by an older interrupted rollback
+    CHECK(install(make_package(t.path / "v2", manifest_json("addon", "cam", "2.0.0", "{\"nrm\": \"cam.nrm\"}"), { { "cam.nrm", "v2" } }), data, opts()).outcome == Outcome::Upgraded);
+    CHECK(read(data / "mods" / "cam.nrm") == "v2");
+    CHECK(!fs::exists(data / "mods" / "cam.nrm.replaced"));
+}

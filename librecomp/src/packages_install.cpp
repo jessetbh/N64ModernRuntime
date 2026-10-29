@@ -12,6 +12,12 @@
 #include <random>
 #include <system_error>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #include "json/json.hpp"
 #include "miniz.h"
 #include "miniz_zip.h"
@@ -274,22 +280,37 @@ namespace recomp::packages {
             return std::nullopt;
         }
 
-        // Whether a package source holds a symlink or junction anywhere (it isn't copied: it could point anywhere).
-        bool has_link(const fs::path &p) {
+        // A symlink, or on Windows any reparse point (a junction isn't reported as a symlink).
+        bool is_link(const fs::path &p) {
             std::error_code ec;
             if (fs::is_symlink(fs::symlink_status(p, ec))) {
                 return true;
             }
+#ifdef _WIN32
+            const DWORD attrs = GetFileAttributesW(p.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                return true;
+            }
+#endif
+            return false;
+        }
+
+        // Whether a package source holds a link anywhere (it isn't copied: it could point anywhere). The walk never
+        // enters a link, so it can't be led outside the package.
+        bool has_link(const fs::path &p) {
+            if (is_link(p)) {
+                return true;
+            }
+            std::error_code ec;
             if (!fs::is_directory(fs::symlink_status(p, ec))) {
                 return false;
             }
             for (fs::recursive_directory_iterator it(p, fs::directory_options::none, ec), end; !ec && it != end; it.increment(ec)) {
-                std::error_code e;
-                if (it->is_symlink(e)) {
+                if (is_link(it->path())) {
                     return true;
                 }
             }
-            return false;
+            return !!ec;   // a folder we couldn't walk isn't known to be link-free
         }
 
         const InstalledFile *record_for(const Entry *entry, const std::string &path) {
@@ -319,12 +340,13 @@ namespace recomp::packages {
             bool placed = false;
         };
 
-        json journal_json(const std::vector<Swap> &swaps, const std::vector<std::string> &to_delete, bool committed) {
+        json journal_json(const std::string &id, const std::string &token, const std::vector<Swap> &swaps,
+            const std::vector<std::string> &to_delete, bool committed) {
             json list = json::array();
             for (const Swap &s : swaps) {
                 list.push_back({ { "dst", s.dst }, { "staged", s.staged }, { "aside", s.aside }, { "keep_aside", s.keep_aside } });
             }
-            return { { "format", 1 }, { "committed", committed }, { "swaps", list }, { "delete", to_delete } };
+            return { { "format", 1 }, { "id", id }, { "token", token }, { "committed", committed }, { "swaps", list }, { "delete", to_delete } };
         }
 
         // Undoes the swaps (newest first). Returns the paths it couldn't put back, for the message.
@@ -467,6 +489,7 @@ namespace recomp::packages {
                     const InstalledFile *rec = owner_record(p.to);
                     if (rec && file_state(*rec, hash_path(dst)) == FileState::Unchanged) {
                         s.aside = s.dst + ".replaced";
+                        fs::remove_all(data_dir / u8path(s.aside), ec);   // a stale one must never be put back
                     }
                     else {
                         // Edited by the player, or put there by hand: kept, never overwritten.
@@ -499,10 +522,17 @@ namespace recomp::packages {
                 }
             }
 
-            // 5. The journal, then the swaps. A crash from here on is finished or undone at the next start.
+            // 5. The journal, then the swaps. A crash from here on is finished or undone at the next start: the
+            //    install's token goes into its registry entry, so a saved registry says "committed" by itself.
             fs::create_directories(data_dir / WorkFolder, ec);
             const fs::path journal = data_dir / WorkFolder / JournalFile;
-            if (!write_replacing(journal, dump(journal_json(swaps, {}, false)))) {
+            char token_buf[32];
+            {
+                static std::mt19937_64 rng{ std::random_device{}() ^ uint64_t(std::chrono::steady_clock::now().time_since_epoch().count()) };
+                std::snprintf(token_buf, sizeof(token_buf), "%016llx", static_cast<unsigned long long>(rng()));
+            }
+            const std::string token = token_buf;
+            if (!write_replacing(journal, dump(journal_json(m.id, token, swaps, {}, false)))) {
                 roll_back(data_dir, swaps);
                 return finish(Outcome::Failed, "can't write the install journal; nothing was changed");
             }
@@ -549,6 +579,7 @@ namespace recomp::packages {
             entry.display_name = m.display_name;
             entry.source = options.source;
             entry.installed = options.now;
+            entry.extra = json{ { "install_token", token } }.dump();
             for (const Swap &s : swaps) {
                 const std::optional<uint64_t> h = hash_path(data_dir / u8path(s.dst));
                 if (!h) {
@@ -592,7 +623,7 @@ namespace recomp::packages {
             }
 
             // 8. Committed: the cleanup can't be undone any more, so the journal says to finish it after a crash.
-            write_replacing(journal, dump(journal_json(swaps, to_delete, true)));
+            write_replacing(journal, dump(journal_json(m.id, token, swaps, to_delete, true)));
             for (const Swap &s : swaps) {
                 if (s.keep_aside) {
                     result.kept.push_back(s.aside);
@@ -636,7 +667,19 @@ namespace recomp::packages {
             const std::string p = (s.contains(key) && s[key].is_string()) ? s[key].get<std::string>() : std::string();
             return (!p.empty() && safe_relative_path(p)) ? p : std::string();
         };
-        const bool committed = j.value("committed", false);
+        bool committed = j.value("committed", false);
+        if (!committed) {
+            // The registry may have been saved just before the crash, ahead of the journal's "committed".
+            Registry registry;
+            const std::string id = j.value("id", std::string()), token = j.value("token", std::string());
+            if (!token.empty() && may_save(load_registry(data_dir, registry))) {
+                if (const Entry *e = find(registry, id); e && !e->extra.empty()) {
+                    const json extra = json::parse(e->extra, nullptr, false);
+                    committed = extra.is_object() && extra.value("install_token", std::string()) == token;
+                }
+            }
+        }
+        bool stuck = false;
         std::vector<json> swaps(j["swaps"].begin(), j["swaps"].end());
         if (committed) {
             // The registry has the new version: finish the cleanup.
@@ -668,7 +711,11 @@ namespace recomp::packages {
                 const bool staged_left = !staged.empty() && fs::exists(data_dir / u8path(staged), ec);
                 if (!aside.empty() && fs::exists(data_dir / u8path(aside), ec)) {
                     fs::remove_all(d, ec);              // the new copy, if it got placed
+                    ec.clear();
                     fs::rename(data_dir / u8path(aside), d, ec);
+                    if (ec) {
+                        stuck = true;
+                    }
                 }
                 else if (aside.empty() && !staged_left) {
                     fs::remove_all(d, ec);              // nothing was there before: the new copy goes
@@ -678,7 +725,19 @@ namespace recomp::packages {
                 }
             }
         }
+        if (stuck) {
+            // Keep the journal: the next start tries again (a file was locked by another program).
+            return "couldn't fully undo an install a crash interrupted; will try again at the next start";
+        }
         fs::remove(journal, ec);
+        // Unpack folders a crash left behind (they can be large).
+        for (fs::directory_iterator it(data_dir / WorkFolder, ec), end; !ec && it != end; it.increment(ec)) {
+            std::error_code e;
+            if (u8str(it->path().filename()).rfind("unpack-", 0) == 0) {
+                fs::remove_all(it->path(), e);
+            }
+        }
+        ec.clear();
         fs::remove(data_dir / WorkFolder, ec);
         return committed ? "finished an install a crash interrupted" : "undid an install a crash interrupted";
     }
