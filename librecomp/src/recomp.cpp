@@ -216,10 +216,12 @@ void recomp::mods::scan_mods() {
     // [wcw fullconv] AKI_CONVERSION=<id>: also open the conversion's own mods (its patch, its texture pack).
     const std::vector<std::filesystem::path> conversion_folders = load_active_conversion(config_path);
     std::vector<std::string> conversion_mod_ids;
+    std::vector<ModContext::OpenedModKind> stock_mods;
     {
         std::lock_guard mod_lock{ mod_context_mutex };
         mod_open_errors = mod_context->scan_mod_folder(config_path / mods_directory);
         const size_t stock_mod_count = mod_context->num_opened_mods();
+        stock_mods = mod_context->opened_mod_kinds(0, stock_mod_count);
         for (const std::filesystem::path &folder : conversion_folders) {
             for (auto &error : mod_context->scan_mod_folder(folder, false)) {
                 mod_open_errors.emplace_back(std::move(error));
@@ -233,9 +235,28 @@ void recomp::mods::scan_mods() {
 
     mod_context->load_mods_config();
     if (!conversion_folders.empty()) {
-        // Exactly the conversion's mods (and the cheats engine for its codes) run; nothing is saved to mods.json.
+        // The conversion's mods (and the cheats engine for its codes) run, plus the player's add-ons it allows: data
+        // packs by default, code add-ons it lists, and whatever the player turned on or off for this conversion
+        // (conversions/<id>/addons.json; aki-roadmap#154). Nothing is saved to mods.json.
+        const conversion::Conversion *active = active_conversion();
+        std::vector<conversion::PlayerMod> player_mods;
+        for (const ModContext::OpenedModKind &m : stock_mods) {
+            player_mods.push_back({ m.id, m.code, m.rom_patch, mod_context->is_mod_enabled(m.id) });
+        }
+        conversion::PlayerAddons player;
+        conversion::Conversion fallback;
+        if (active) {
+            std::ifstream addons_file(config_path / conversion::Folder / std::filesystem::path(std::u8string(active->id.begin(), active->id.end())) / conversion::AddonsFile, std::ios::binary);
+            if (addons_file) {
+                player = conversion::parse_player_addons(std::string(std::istreambuf_iterator<char>(addons_file), std::istreambuf_iterator<char>()));
+            }
+        }
+        std::vector<std::string> why;
         mod_context->apply_session_enabled_mods(conversion::session_enabled_mods(conversion_mod_ids,
-            active_conversion_codes_runnable(), active_conversion_cheats_mod()));
+            active_conversion_codes_runnable(), active_conversion_cheats_mod(), player_mods, active ? *active : fallback, player, &why));
+        for (const std::string &line : why) {
+            fprintf(stderr, "[conversion] %s\n", line.c_str());
+        }
         for (const std::string &id : conversion_mod_ids) {
             fprintf(stderr, "[conversion] mod %s enabled for this session\n", id.c_str());
         }

@@ -1290,6 +1290,20 @@ std::vector<std::string> recomp::mods::ModContext::opened_mod_ids_from(size_t fi
     return ids;
 }
 
+std::vector<recomp::mods::ModContext::OpenedModKind> recomp::mods::ModContext::opened_mod_kinds(size_t first, size_t last) {
+    std::unique_lock lock(opened_mods_mutex);
+    std::vector<OpenedModKind> out;
+    for (size_t i = first; i < last && i < opened_mods.size(); i++) {
+        const ModHandle &mod = opened_mods[i];
+        auto has = [&](const ModContentTypeId &type) {
+            return std::find(mod.content_types.begin(), mod.content_types.end(), type) != mod.content_types.end();
+        };
+        // The same content types the loader acts on (a stray patch.bps in a texture container never applies).
+        out.push_back({ mod.manifest.mod_id, has(code_content_type_id), has(rom_patch_content_type_id) });
+    }
+    return out;
+}
+
 void recomp::mods::ModContext::apply_session_enabled_mods(const std::unordered_set<std::string>& session_mods) {
     session_only_config = true;
     std::vector<std::string> ids = opened_mod_ids_from(0);

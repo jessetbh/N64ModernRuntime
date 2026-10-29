@@ -255,3 +255,95 @@ TEST_CASE("conversion: codes run for the same game (the engine translates revisi
     CHECK(!codes_runnable("vpw2", "nomercy-rev1"));
     CHECK(codes_runnable("vpw2", "vpw2"));
 }
+
+// The session rule with the player's add-ons (aki-roadmap#154 step 4).
+
+TEST_CASE("conversion: aki.json addons policy parses (default data)") {
+    Conversion c;
+    std::string error;
+    CHECK(parse(Full, "", c, error));
+    CHECK(c.addons_allow == AddonsAllow::Data);
+    CHECK(c.addons_mods.empty());
+    std::string with = Full;
+    with.insert(with.rfind('}'), R"(, "addons": { "allow": "none", "mods": ["aki_camera", 5] })");
+    CHECK(parse(with, "", c, error));
+    CHECK(c.addons_allow == AddonsAllow::None);
+    CHECK(c.addons_mods == std::vector<std::string>{ "aki_camera" });
+    std::string all = Full;
+    all.insert(all.rfind('}'), R"(, "addons": { "allow": "all" })");
+    CHECK(parse(all, "", c, error) && c.addons_allow == AddonsAllow::All);
+    std::string odd = Full;
+    odd.insert(odd.rfind('}'), R"(, "addons": { "allow": "everything" })");
+    CHECK(parse(odd, "", c, error) && c.addons_allow == AddonsAllow::Data);   // unknown: the default
+}
+
+TEST_CASE("conversion: player addons.json parses; bad input is empty") {
+    const PlayerAddons p = parse_player_addons(R"({"enabled": ["aki_camera"], "disabled": ["hd", 3]})");
+    CHECK(p.enabled == std::vector<std::string>{ "aki_camera" });
+    CHECK(p.disabled == std::vector<std::string>{ "hd" });
+    CHECK(parse_player_addons("nope").enabled.empty());
+}
+
+TEST_CASE("conversion: session add-ons follow the conversion's policy and the player's word") {
+    const std::vector<PlayerMod> mods = {
+        { "hd_textures", false, false, true },      // data pack, enabled
+        { "off_textures", false, false, false },    // data pack, not enabled
+        { "aki_camera", true, false, true },        // code, enabled
+        { "aki_modelimport", true, false, true },   // code, enabled
+        { "aki_cheats", true, false, true },        // the cheats engine
+    };
+    Conversion c;   // default: data
+    std::vector<std::string> why;
+    auto on = session_enabled_mods({ "hack_patch" }, false, "aki_cheats", mods, c, {}, &why);
+    CHECK(on.contains("hack_patch"));
+    CHECK(on.contains("hd_textures"));
+    CHECK(!on.contains("off_textures"));
+    CHECK(!on.contains("aki_camera"));
+    CHECK(!on.contains("aki_cheats"));          // no runnable codes, not listed
+    CHECK(why.size() == mods.size());           // one line per player mod
+
+    c.addons_mods = { "aki_modelimport" };      // the conversion's allow-list
+    on = session_enabled_mods({ "hack_patch" }, true, "aki_cheats", mods, c, {});
+    CHECK(on.contains("aki_modelimport"));
+    CHECK(!on.contains("aki_camera"));
+    CHECK(on.contains("aki_cheats"));           // runnable codes
+
+    c.addons_allow = AddonsAllow::All;
+    on = session_enabled_mods({ "hack_patch" }, false, "aki_cheats", mods, c, {});
+    CHECK(on.contains("aki_camera") && on.contains("hd_textures") && !on.contains("off_textures"));
+
+    c.addons_allow = AddonsAllow::None;
+    PlayerAddons player;
+    player.enabled = { "aki_camera", "off_textures" };
+    player.disabled = { "hd_textures" };
+    on = session_enabled_mods({ "hack_patch" }, false, "aki_cheats", mods, c, player);
+    CHECK(on.contains("aki_camera"));           // the player's word wins over the conversion's
+    CHECK(on.contains("off_textures"));
+    CHECK(!on.contains("hd_textures"));
+    CHECK(!on.contains("aki_modelimport"));     // allow none
+    CHECK(on.contains("hack_patch"));           // the conversion's own always run
+}
+
+TEST_CASE("conversion: another hack's patch never joins; the cheats engine needs the conversion's codes") {
+    const std::vector<PlayerMod> mods = {
+        { "other_hack", false, true, true },        // another ROM hack's patch, enabled
+        { "aki_cheats", true, false, true },        // the cheats engine, enabled
+        { "both", true, false, true },              // in both of the player's lists
+    };
+    Conversion c;
+    c.addons_allow = AddonsAllow::All;
+    auto on = session_enabled_mods({ "hack_patch" }, false, "aki_cheats", mods, c, {});
+    CHECK(!on.contains("other_hack"));           // even under "all"
+    CHECK(!on.contains("aki_cheats"));           // no runnable codes: the stock list would poke the hack
+    CHECK(on.contains("both"));
+    PlayerAddons player;
+    player.enabled = { "other_hack", "aki_cheats", "both", "hack_patch" };
+    player.disabled = { "both", "hack_patch" };
+    on = session_enabled_mods({ "hack_patch" }, false, "aki_cheats", mods, c, player);
+    CHECK(!on.contains("other_hack"));           // not even when the player asks
+    CHECK(on.contains("aki_cheats"));            // the player's own choice
+    CHECK(!on.contains("both"));                 // disabled wins
+    CHECK(on.contains("hack_patch"));            // the conversion's own can't be turned off
+    on = session_enabled_mods({ "hack_patch" }, true, "aki_cheats", mods, c, {});
+    CHECK(on.contains("aki_cheats"));            // runnable codes
+}
