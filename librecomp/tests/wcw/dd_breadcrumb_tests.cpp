@@ -65,3 +65,45 @@ TEST_CASE("dd breadcrumb: fatal tags: the game, kind:fatal, then WCW_DD_TAGS wit
     CHECK(tags[3] == "owner:jesse");
     CHECK(fatal_tags("", nullptr).size() == 1);
 }
+
+// The golden cases shared with rt64's in-game metrics (dd_event_golden.inc, the same file in both repos): both copies
+// of the tag and event format give the same strings (aki-roadmap#125).
+static std::vector<std::string> golden_split(const std::string& joined) {
+    std::vector<std::string> out;
+    if (joined.empty()) {
+        return out;
+    }
+
+    size_t pos = 0;
+    while (true) {
+        const size_t end = joined.find(';', pos);
+        out.push_back(joined.substr(pos, (end == std::string::npos) ? std::string::npos : end - pos));
+        if (end == std::string::npos) {
+            return out;
+        }
+
+        pos = end + 1;
+    }
+}
+
+static std::string golden_join(const std::vector<std::string>& tags) {
+    std::string out;
+    for (const std::string& t : tags) {
+        out += t + ";";
+    }
+
+    return out;
+}
+
+TEST_CASE("dd breadcrumb: the shared golden cases (rt64's metrics make the same lines)") {
+#define DD_GOLDEN_TAG(key, value, want) CHECK(tag(key, value) == want);
+#define DD_GOLDEN_TAGS(list, want) CHECK(golden_join(parse_tags(list)) == want);
+#define DD_GOLDEN_GAME(exe, want) CHECK(game_from_exe(exe) == want);
+#define DD_GOLDEN_EVENT(title, text, tags, alert, key, want) \
+    CHECK(event_line(title, text, golden_split(tags), alert, key) == want);
+#include "dd_event_golden.inc"
+#undef DD_GOLDEN_TAG
+#undef DD_GOLDEN_TAGS
+#undef DD_GOLDEN_GAME
+#undef DD_GOLDEN_EVENT
+}
