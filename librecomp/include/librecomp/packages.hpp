@@ -279,6 +279,41 @@ namespace recomp {
         // for the Mods menu. Does nothing (and creates nothing) without an import folder.
         constexpr const char *ImportFolder = "import";
         std::vector<InstallResult> process_import_folder(const std::filesystem::path &data_dir, const InstallOptions &options);
+
+        // ---- Migration (aki-roadmap#154 step 3): the first start with the package registry ----
+
+        constexpr const char *MigrationMarker = ".aki-migrated";   // in the data folder once migration has run
+        constexpr const char *MigrationLog = "migration.log";
+
+        struct MigrateOptions {
+            std::string game_id;        // this port's mod game id (written into generated conversions as its short key)
+            std::string rom_sha1;       // the player's ROM, lower-case hex, for a migrated hack's base_rom ("" = left out)
+            std::string now;            // UTC ISO 8601 ("" = now)
+            bool dry_run = false;       // work out and log what would happen; change nothing, write no marker
+        };
+        struct MigrateReport {
+            bool ran = false;                   // false: already migrated, or the registry can't be written
+            std::vector<std::string> lines;     // what it did (also in migration.log)
+            std::vector<std::string> recorded;  // ids added to the registry
+            std::vector<std::string> moved;     // patch-mod hacks that became conversions
+            std::string chosen;                 // the conversion that became the next start's choice ("" = none)
+            std::vector<std::string> also_enabled;  // other hacks that were enabled with it (they stacked before)
+        };
+        // Whether migration has already run for this data folder.
+        bool migration_done(const std::filesystem::path &data_dir);
+        // Once per data folder (MigrationMarker):
+        // 1. Patch-mod ROM hacks in mods/ (an .nrm holding patch.bps and no code) become conversions: the .nrm moves
+        //    to conversions/<mod id>/patch.nrm with a generated aki.json (format aki-conversion 1) from its mod.json.
+        //    Their saves are already in saves/<mod id>/, which is the conversion's save folder. If mods.json had any
+        //    enabled, the first (in mod order) becomes conversions/active.txt (unless a choice exists) and the rest
+        //    are listed: only one hack runs at a time now.
+        // 2. What is already installed is recorded in the registry with its current hash (source "migrated", or
+        //    "bundled" for starter packs mods/models/.bundled names), so a package can upgrade it later: code add-ons
+        //    and patch .nrm, texture packs (.rtz or a folder with rt64.json), model packs (mods/models/*.akimodel) and
+        //    conversions (conversions/<id> with aki.json). Ids that aren't valid package ids, or that another kind
+        //    already holds, stay unrecorded ("manual") and are logged.
+        // 3. The log goes to migration.log and the marker is written. Nothing is deleted. Never throws.
+        MigrateReport migrate(const std::filesystem::path &data_dir, const MigrateOptions &options);
     }
 }
 
