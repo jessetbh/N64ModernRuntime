@@ -11,6 +11,8 @@ add_library(librecomp STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/cont.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/config_option.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/config.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/dd_breadcrumb.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/dd_breadcrumb_send.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/dp.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/eep.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/euc-jp.cpp"
@@ -70,6 +72,10 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/../N64Recomp ${CMAKE_CURRENT_BINARY_DIR}/
 
 target_link_libraries(librecomp PRIVATE ultramodern N64Recomp LiveRecomp)
 target_link_libraries(librecomp PUBLIC miniz)
+# [wcw] dd_breadcrumb_send.cpp: one UDP datagram to the local Datadog Agent (aki-roadmap#125).
+if (WIN32)
+    target_link_libraries(librecomp PUBLIC ws2_32)
+endif()
 
 # [wcw] Unit tests for librecomp's own decision logic (tests/wcw: quitting during startup, jessetbh/aki-roadmap#73;
 # save backup rules, aki-roadmap#50; ultramodern's idle external-message wait, aki-roadmap#90; texture pack folders, aki-roadmap#48; dependency auto-enable and folder mod ids, aki-roadmap#100). Plain C++ (no game, no ROM), built and run as part of every librecomp build, so a
@@ -82,6 +88,8 @@ if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
         "${PROJECT_SOURCE_DIR}/tests/wcw/external_message_pump_tests.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/mod_folder_rules_tests.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/mod_enable_rules_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/dd_breadcrumb_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/dd_breadcrumb.cpp"
         "${PROJECT_SOURCE_DIR}/src/save_backup_rules.cpp"
         "${PROJECT_SOURCE_DIR}/src/mod_folder_rules.cpp"
         "${PROJECT_SOURCE_DIR}/src/mod_enable_rules.cpp"
