@@ -21,8 +21,8 @@ namespace recomp::packages {
 
         constexpr size_t MaxIdLength = 48;
 
-        bool is_hex40(const std::string &s) {
-            return s.size() == 40 && s.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
+        bool is_hex(const std::string &s, size_t n) {
+            return s.size() == n && s.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
         }
 
         std::string lower(std::string s) {
@@ -30,12 +30,57 @@ namespace recomp::packages {
             return s;
         }
 
-        // Path prefix test on '/' boundaries: "mods/a" owns "mods/a" and "mods/a/b", not "mods/ab".
-        bool covers(const std::string &owner, const std::string &path) {
-            if (path.size() < owner.size() || path.compare(0, owner.size(), owner) != 0) {
+        bool is_blank(const std::string &s) {
+            return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); });
+        }
+
+        // Windows device names, matched on the stem before the first '.' ("nul.txt" and "aux.tar.gz" are devices too).
+        bool is_device_name(const std::string &part) {
+            const std::string stem = lower(part.substr(0, part.find('.')));
+            if (stem == "con" || stem == "prn" || stem == "aux" || stem == "nul") {
+                return true;
+            }
+            return stem.size() == 4 && (stem.compare(0, 3, "com") == 0 || stem.compare(0, 3, "lpt") == 0) &&
+                stem[3] >= '1' && stem[3] <= '9';
+        }
+
+        // Path prefix test on '/' boundaries, ignoring ASCII case: "mods/a" owns "mods/a" and "mods/A/b", not "mods/ab".
+        bool covers(const std::string &owner_path, const std::string &path) {
+            const std::string owner = lower(normal_path(owner_path));
+            const std::string p = lower(normal_path(path));
+            if (p.size() < owner.size() || p.compare(0, owner.size(), owner) != 0) {
                 return false;
             }
-            return path.size() == owner.size() || path[owner.size()] == '/';
+            return p.size() == owner.size() || p[owner.size()] == '/';
+        }
+
+        // Decimal digit strings of any length, as numbers.
+        int compare_numbers(const std::string &a, const std::string &b) {
+            const size_t za = std::min(a.find_first_not_of('0'), a.size());
+            const size_t zb = std::min(b.find_first_not_of('0'), b.size());
+            const size_t la = a.size() - za, lb = b.size() - zb;
+            if (la != lb) {
+                return (la < lb) ? -1 : 1;
+            }
+            const int c = a.compare(za, la, b, zb, lb);
+            return (c < 0) ? -1 : (c > 0) ? 1 : 0;
+        }
+
+        bool all_digits(const std::string &s) {
+            return !s.empty() && s.find_first_not_of("0123456789") == std::string::npos;
+        }
+
+        std::vector<std::string> split(const std::string &s, char sep) {
+            std::vector<std::string> out;
+            size_t start = 0;
+            while (true) {
+                const size_t end = s.find(sep, start);
+                out.push_back(s.substr(start, end == std::string::npos ? std::string::npos : end - start));
+                if (end == std::string::npos) {
+                    return out;
+                }
+                start = end + 1;
+            }
         }
     }
 
@@ -45,8 +90,9 @@ namespace recomp::packages {
             case Kind::TexturePack: return "texture-pack";
             case Kind::ModelPack: return "model-pack";
             case Kind::Conversion: return "conversion";
+            case Kind::Unknown: return "unknown";
         }
-        return "addon";
+        return "unknown";
     }
 
     std::optional<Kind> parse_kind(const std::string &name) {
@@ -59,7 +105,7 @@ namespace recomp::packages {
     }
 
     bool valid_id(const std::string &id) {
-        if (id.empty() || id.size() > MaxIdLength) {
+        if (id.empty() || id.size() > MaxIdLength || id.back() == '.' || is_device_name(id)) {
             return false;
         }
         for (size_t i = 0; i < id.size(); i++) {
@@ -73,31 +119,20 @@ namespace recomp::packages {
     }
 
     bool valid_version(const std::string &version) {
-        size_t pos = 0;
-        for (int part = 0; part < 3; part++) {
-            const size_t start = pos;
-            while (pos < version.size() && version[pos] >= '0' && version[pos] <= '9') {
-                pos++;
-            }
-            if (pos == start) {
-                return false;
-            }
-            if (part < 2) {
-                if (pos >= version.size() || version[pos] != '.') {
-                    return false;
-                }
-                pos++;
-            }
-        }
-        if (pos == version.size()) {
-            return true;
-        }
-        if (version[pos] != '-' || pos + 1 == version.size()) {
+        const size_t dash = version.find('-');
+        const std::vector<std::string> core = split(version.substr(0, dash), '.');
+        if (core.size() != 3 || !std::all_of(core.begin(), core.end(), all_digits)) {
             return false;
         }
-        for (size_t i = pos + 1; i < version.size(); i++) {
-            const char c = version[i];
-            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '-') {
+        if (dash == std::string::npos) {
+            return true;
+        }
+        const std::string pre = version.substr(dash + 1);
+        if (pre.empty()) {
+            return false;
+        }
+        for (const std::string &id : split(pre, '.')) {
+            if (id.empty() || !std::all_of(id.begin(), id.end(), [](unsigned char c) { return std::isalnum(c) || c == '-'; })) {
                 return false;
             }
         }
@@ -106,23 +141,37 @@ namespace recomp::packages {
 
     int compare_versions(const std::string &a, const std::string &b) {
         const size_t da = a.find('-'), db = b.find('-');
-        const std::string ra = a.substr(0, da), rb = b.substr(0, db);
-        const int c = recomp::mods::bundled_packs::compare_versions(ra, rb);
-        if (c != 0) {
-            return c;
+        const std::vector<std::string> ca = split(a.substr(0, da), '.'), cb = split(b.substr(0, db), '.');
+        for (size_t i = 0; i < std::max(ca.size(), cb.size()); i++) {
+            const std::string x = (i < ca.size() && all_digits(ca[i])) ? ca[i] : "0";
+            const std::string y = (i < cb.size() && all_digits(cb[i])) ? cb[i] : "0";
+            if (const int c = compare_numbers(x, y)) {
+                return c;
+            }
         }
-        const std::string pa = (da == std::string::npos) ? std::string() : a.substr(da + 1);
-        const std::string pb = (db == std::string::npos) ? std::string() : b.substr(db + 1);
-        if (pa == pb) {
-            return 0;
+        const bool pre_a = da != std::string::npos, pre_b = db != std::string::npos;
+        if (!pre_a || !pre_b) {
+            return (pre_a == pre_b) ? 0 : (pre_a ? -1 : 1);   // a release sorts after its prereleases
         }
-        if (pa.empty()) {
-            return 1;   // a release sorts after its prereleases
+        const std::vector<std::string> pa = split(a.substr(da + 1), '.'), pb = split(b.substr(db + 1), '.');
+        for (size_t i = 0; i < std::min(pa.size(), pb.size()); i++) {
+            const bool na = all_digits(pa[i]), nb = all_digits(pb[i]);
+            int c;
+            if (na && nb) {
+                c = compare_numbers(pa[i], pb[i]);
+            }
+            else if (na != nb) {
+                c = na ? -1 : 1;   // a number sorts before text
+            }
+            else {
+                c = pa[i].compare(pb[i]);
+                c = (c < 0) ? -1 : (c > 0) ? 1 : 0;
+            }
+            if (c) {
+                return c;
+            }
         }
-        if (pb.empty()) {
-            return -1;
-        }
-        return (pa < pb) ? -1 : 1;
+        return (pa.size() == pb.size()) ? 0 : (pa.size() < pb.size() ? -1 : 1);
     }
 
     std::string game_id_for_key(const std::string &short_key) {
@@ -144,26 +193,32 @@ namespace recomp::packages {
     }
 
     bool safe_relative_path(const std::string &path) {
-        if (path.empty() || path.front() == '/' || path.find('\\') != std::string::npos ||
-            path.find(':') != std::string::npos || path.find('\0') != std::string::npos) {
+        if (path.empty() || path.front() == '/') {
             return false;
         }
-        size_t start = 0;
-        while (start <= path.size()) {
-            size_t end = path.find('/', start);
-            if (end == std::string::npos) {
-                end = path.size();
+        for (unsigned char c : path) {
+            if (c < 0x20 || c == 0x7F || std::string("\\:*?\"<>|").find(char(c)) != std::string::npos) {
+                return false;
             }
-            const std::string part = path.substr(start, end - start);
-            if (part.empty() || part == "." || part == "..") {
-                // A single trailing '/' on a folder is allowed ("conversion/").
-                if (!(part.empty() && end == path.size() && start > 0)) {
-                    return false;
-                }
+        }
+        const std::string body = (path.back() == '/') ? path.substr(0, path.size() - 1) : path;
+        if (body.empty()) {
+            return false;
+        }
+        for (const std::string &part : split(body, '/')) {
+            if (part.empty() || part == "." || part == ".." || part.back() == '.' || part.back() == ' ' || is_device_name(part)) {
+                return false;
             }
-            start = end + 1;
         }
         return true;
+    }
+
+    std::string normal_path(const std::string &path) {
+        std::string p = path;
+        while (!p.empty() && p.back() == '/') {
+            p.pop_back();
+        }
+        return p;
     }
 
     bool parse_manifest(const std::string &json_text, Manifest &out, std::vector<Problem> &problems) {
@@ -215,9 +270,10 @@ namespace recomp::packages {
             error("format", "missing (must be 1)");
         }
         else {
-            out.format = fmt->get<int>();
-            if (out.format != ManifestFormat) {
-                error("format", "format " + std::to_string(out.format) + " isn't supported by this version (1 is)");
+            const int64_t f = fmt->get<int64_t>();
+            out.format = (f >= 0 && f <= 1000000) ? int(f) : -1;
+            if (f != ManifestFormat) {
+                error("format", "format " + std::to_string(f) + " isn't supported by this version (1 is)");
             }
         }
 
@@ -237,7 +293,8 @@ namespace recomp::packages {
 
         text(root, "id", out.id, true, "id");
         if (!out.id.empty() && !valid_id(out.id)) {
-            error("id", "\"" + out.id + "\" must be lower-case letters, digits, '_', '.' or '-', start with a letter or digit, at most 48 characters");
+            error("id", "\"" + out.id + "\" must be lower-case letters, digits, '_', '.' or '-', start with a letter or digit, "
+                "not end in '.', not be a Windows device name, at most 48 characters");
         }
         text(root, "version", out.version, true, "version");
         if (!out.version.empty() && !valid_version(out.version)) {
@@ -249,7 +306,7 @@ namespace recomp::packages {
             error("game_id", "\"" + out.game_id + "\" isn't a game id" + (mapped.empty() ? std::string() : " (use \"" + mapped + "\")"));
         }
         text(root, "display_name", out.display_name, true, "display_name");
-        if (root.contains("display_name") && out.display_name.empty()) {
+        if (root.contains("display_name") && root["display_name"].is_string() && is_blank(out.display_name)) {
             error("display_name", "is empty");
         }
         if (!root.contains("authors")) {
@@ -257,7 +314,7 @@ namespace recomp::packages {
         }
         else {
             list(root, "authors", out.authors, "authors");
-            if (out.authors.empty() || std::any_of(out.authors.begin(), out.authors.end(), [](const std::string &a) { return a.empty(); })) {
+            if (out.authors.empty() || std::any_of(out.authors.begin(), out.authors.end(), is_blank)) {
                 error("authors", "needs at least one non-empty name");
             }
         }
@@ -295,7 +352,7 @@ namespace recomp::packages {
             else {
                 list(*rom, "sha1", out.base_rom_sha1, "base_rom.sha1");
                 for (std::string &h : out.base_rom_sha1) {
-                    if (!is_hex40(h)) {
+                    if (!is_hex(h, 40)) {
                         error("base_rom.sha1", "\"" + h + "\" isn't a 40-digit SHA-1");
                     }
                     h = lower(h);
@@ -355,7 +412,7 @@ namespace recomp::packages {
                 }
             };
             auto ends_with = [](const std::string &s, const char *suffix) {
-                const std::string sl = lower(s), x = suffix;
+                const std::string sl = lower(normal_path(s)), x = suffix;
                 return sl.size() >= x.size() && sl.compare(sl.size() - x.size(), x.size(), x) == 0;
             };
             switch (out.kind) {
@@ -382,11 +439,7 @@ namespace recomp::packages {
                         error("payload.packs", "a model pack needs at least one .akimodel folder");
                     }
                     for (const std::string &p : out.packs) {
-                        std::string trimmed = p;
-                        while (!trimmed.empty() && trimmed.back() == '/') {
-                            trimmed.pop_back();
-                        }
-                        if (!ends_with(trimmed, ".akimodel")) {
+                        if (!ends_with(p, ".akimodel")) {
                             error("payload.packs", "\"" + p + "\" must be an .akimodel folder");
                         }
                     }
@@ -405,6 +458,17 @@ namespace recomp::packages {
                         }
                     }
                     break;
+                case Kind::Unknown:
+                    break;
+            }
+            // Every payload part installs on its own: no path twice, none inside another.
+            const std::vector<std::string> paths = payload_paths(out);
+            for (size_t i = 0; i < paths.size(); i++) {
+                for (size_t j = i + 1; j < paths.size(); j++) {
+                    if (covers(paths[i], paths[j]) || covers(paths[j], paths[i])) {
+                        error("payload", "\"" + paths[i] + "\" and \"" + paths[j] + "\" overlap");
+                    }
+                }
             }
         }
 
@@ -427,51 +491,95 @@ namespace recomp::packages {
         return out;
     }
 
-    bool parse_registry(const std::string &json_text, Registry &out) {
+    bool may_save(RegistryStatus status) {
+        return status == RegistryStatus::Ok || status == RegistryStatus::Damaged;
+    }
+
+    RegistryStatus parse_registry(const std::string &json_text, Registry &out) {
         out = Registry{};
         const json root = json::parse(json_text, nullptr, false);
-        if (root.is_discarded() || !root.is_object() || !root.contains("format") || !root["format"].is_number_integer() ||
-            root["format"].get<int>() != RegistryFormat) {
-            return false;
+        if (root.is_discarded() || !root.is_object() || !root.contains("format") || !root["format"].is_number_integer()) {
+            return RegistryStatus::Corrupt;
+        }
+        const int64_t format = root["format"].get<int64_t>();
+        if (format > RegistryFormat) {
+            return RegistryStatus::Newer;
         }
         const auto list = root.find("packages");
-        if (list == root.end() || !list->is_array()) {
-            return false;
+        if (format != RegistryFormat || list == root.end() || !list->is_array()) {
+            return RegistryStatus::Corrupt;
         }
+        static const char *Known[] = { "id", "kind", "version", "display_name", "source", "installed", "parent", "files" };
         bool clean = true;
         for (const json &p : *list) {
-            Entry e;
-            const auto kind = (p.is_object() && p.contains("kind") && p["kind"].is_string()) ? parse_kind(p["kind"].get<std::string>()) : std::nullopt;
-            if (!p.is_object() || !kind || !p.contains("id") || !p["id"].is_string() || !valid_id(p["id"].get<std::string>()) || find(out, p["id"].get<std::string>())) {
+            if (!p.is_object() || !p.contains("id") || !p["id"].is_string() || !p.contains("kind") || !p["kind"].is_string()) {
                 clean = false;
                 continue;
             }
+            Entry e;
             e.id = p["id"].get<std::string>();
-            e.kind = *kind;
-            e.version = p.value("version", std::string());
-            e.display_name = p.value("display_name", std::string());
-            e.source = p.value("source", std::string());
-            e.installed = p.value("installed", std::string());
-            e.parent = p.value("parent", std::string());
+            e.kind_text = p["kind"].get<std::string>();
+            e.kind = parse_kind(e.kind_text).value_or(Kind::Unknown);
+            if (!valid_id(e.id) || e.kind_text.empty() || find(out, e.id)) {
+                clean = false;
+                continue;
+            }
+            auto str = [&](const char *key) {
+                const auto it = p.find(key);
+                return (it != p.end() && it->is_string()) ? it->get<std::string>() : std::string();
+            };
+            e.version = str("version");
+            e.display_name = str("display_name");
+            e.source = str("source");
+            e.installed = str("installed");
+            e.parent = str("parent");
+            if (!e.parent.empty() && !valid_id(e.parent)) {
+                e.parent.clear();
+                clean = false;
+            }
             bool files_ok = true;
-            if (const auto files = p.find("files"); files != p.end() && files->is_array()) {
-                for (const json &f : *files) {
-                    const std::string path = (f.is_object() && f.contains("path") && f["path"].is_string()) ? f["path"].get<std::string>() : std::string();
-                    const std::string hash = (f.is_object() && f.contains("hash") && f["hash"].is_string()) ? f["hash"].get<std::string>() : std::string();
-                    if (!safe_relative_path(path) || hash.size() != 16 || hash.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
-                        files_ok = false;
-                        break;
+            if (const auto files = p.find("files"); files != p.end()) {
+                if (!files->is_array()) {
+                    files_ok = false;
+                }
+                else {
+                    for (const json &f : *files) {
+                        const std::string path = (f.is_object() && f.contains("path") && f["path"].is_string()) ? f["path"].get<std::string>() : std::string();
+                        const std::string hash = (f.is_object() && f.contains("hash") && f["hash"].is_string()) ? f["hash"].get<std::string>() : std::string();
+                        if (!safe_relative_path(path) || !is_hex(hash, 16)) {
+                            files_ok = false;
+                            break;
+                        }
+                        e.files.push_back({ normal_path(path), std::stoull(hash, nullptr, 16) });
                     }
-                    e.files.push_back({ path, std::stoull(hash, nullptr, 16) });
+                }
+            }
+            // A path already claimed by an entry read before this one: keep the first owner.
+            for (const InstalledFile &f : e.files) {
+                for (const Entry &other : out.packages) {
+                    for (const InstalledFile &g : other.files) {
+                        if (covers(g.path, f.path) || covers(f.path, g.path)) {
+                            files_ok = false;
+                        }
+                    }
                 }
             }
             if (!files_ok) {
                 clean = false;
                 continue;
             }
+            json extra = json::object();
+            for (const auto &[key, value] : p.items()) {
+                if (std::find(std::begin(Known), std::end(Known), key) == std::end(Known)) {
+                    extra[key] = value;
+                }
+            }
+            if (!extra.empty()) {
+                e.extra = extra.dump();
+            }
             upsert(out, std::move(e));
         }
-        return clean;
+        return clean ? RegistryStatus::Ok : RegistryStatus::Damaged;
     }
 
     std::string format_registry(const Registry &registry) {
@@ -479,14 +587,25 @@ namespace recomp::packages {
         for (const Entry &e : registry.packages) {
             json files = json::array();
             for (const InstalledFile &f : e.files) {
-                files.push_back({ { "path", f.path }, { "hash", recomp::mods::bundled_packs::hash_hex(f.hash) } });
+                files.push_back({ { "path", normal_path(f.path) }, { "hash", recomp::mods::bundled_packs::hash_hex(f.hash) } });
             }
-            json p = { { "id", e.id }, { "kind", kind_name(e.kind) }, { "version", e.version }, { "display_name", e.display_name },
+            const std::string kind = (e.kind == Kind::Unknown) ? e.kind_text : std::string(kind_name(e.kind));
+            json p = { { "id", e.id }, { "kind", kind }, { "version", e.version }, { "display_name", e.display_name },
                        { "source", e.source }, { "installed", e.installed } };
             if (!e.parent.empty()) {
                 p["parent"] = e.parent;
             }
             p["files"] = files;
+            if (!e.extra.empty()) {
+                const json extra = json::parse(e.extra, nullptr, false);
+                if (extra.is_object()) {
+                    for (const auto &[key, value] : extra.items()) {
+                        if (!p.contains(key)) {
+                            p[key] = value;
+                        }
+                    }
+                }
+            }
             list.push_back(p);
         }
         return json{ { "format", RegistryFormat }, { "packages", list } }.dump(2) + "\n";
@@ -502,6 +621,9 @@ namespace recomp::packages {
     }
 
     void upsert(Registry &registry, Entry entry) {
+        for (InstalledFile &f : entry.files) {
+            f.path = normal_path(f.path);
+        }
         auto &list = registry.packages;
         const auto it = std::lower_bound(list.begin(), list.end(), entry.id, [](const Entry &e, const std::string &id) { return e.id < id; });
         if (it != list.end() && it->id == entry.id) {
@@ -534,15 +656,19 @@ namespace recomp::packages {
         return {};
     }
 
-    std::string conflict(const Registry &registry, const std::string &id, Kind kind, const std::vector<std::string> &paths) {
+    std::string conflict(const Registry &registry, const std::string &id, Kind kind, const std::vector<std::string> &paths,
+        const std::vector<std::string> &replacing) {
+        auto skipped = [&](const std::string &other) {
+            return other == id || std::find(replacing.begin(), replacing.end(), other) != replacing.end();
+        };
         if (const Entry *e = find(registry, id); e && e->kind != kind) {
-            return "the id \"" + id + "\" is already used by the " + kind_name(e->kind) + " \"" +
-                (e->display_name.empty() ? e->id : e->display_name) + "\"";
+            return "the id \"" + id + "\" is already used by the " + (e->kind == Kind::Unknown ? e->kind_text : kind_name(e->kind)) +
+                " \"" + (e->display_name.empty() ? e->id : e->display_name) + "\"";
         }
         for (const std::string &p : paths) {
             for (const Entry &e : registry.packages) {
-                if (e.id == id) {
-                    continue;   // its own files (an upgrade)
+                if (skipped(e.id)) {
+                    continue;   // its own files (an upgrade), or a package this one replaces
                 }
                 for (const InstalledFile &f : e.files) {
                     if (covers(f.path, p) || covers(p, f.path)) {
@@ -559,5 +685,9 @@ namespace recomp::packages {
             return FileState::Missing;
         }
         return (*current_hash == file.hash) ? FileState::Unchanged : FileState::Edited;
+    }
+
+    uint64_t hash_bytes(const std::string &file_name, const std::string &data) {
+        return recomp::mods::bundled_packs::pack_hash({ { file_name, data } });
     }
 }

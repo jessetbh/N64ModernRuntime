@@ -28,6 +28,9 @@ namespace recomp {
             // a checkout gave them don't change the hash. Must match pack_history.py.
             uint64_t pack_hash(std::vector<std::pair<std::string, std::string>> files);
             std::string hash_hex(uint64_t hash);   // 16 lower-case hex digits
+            // Whether pack_hash treats a file as text (CRLF counts as LF): .json, .md, .txt, by the extension Python's
+            // os.path.splitext sees (leading dots of the file name don't start one).
+            bool is_text_file(const std::string &path);
 
             // Dotted versions compared part by part as numbers ("1.10.0" > "1.9.0"); a missing part or one that isn't a
             // number counts as 0. Negative: a < b.
