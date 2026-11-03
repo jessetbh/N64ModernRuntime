@@ -1814,6 +1814,12 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_mo
         }
         
         auto patch_result = recomp::patcher::patch_rom(recomp::get_rom(), std::span{ reinterpret_cast<const uint8_t*>(patch_data.data()), patch_data.size() }, patched_rom);
+        if (patch_result == recomp::patcher::PatcherResult::WrongRom) {
+            // [wcw fullconv] aki-roadmap#173: say why instead of running a half-applied image.
+            fprintf(stderr, "[romhack] %s: the patch was built for a different ROM than this one; not applied\n", mod.manifest.mod_id.c_str());
+            ret.emplace_back(mod.manifest.mod_id, ModLoadError::FailedToLoadPatch, "built for a different ROM");
+            return ret;
+        }
         if (patch_result != recomp::patcher::PatcherResult::Success) {
             ret.emplace_back(mod.manifest.mod_id, ModLoadError::FailedToLoadPatch, std::string{});
             return ret;
