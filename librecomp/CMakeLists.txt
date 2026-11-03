@@ -124,7 +124,7 @@ if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
         "${PROJECT_SOURCE_DIR}/tests/wcw/regen_rules_tests.cpp"
         "${PROJECT_SOURCE_DIR}/src/regen_rules.cpp"
     )
-    target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/include/librecomp" "${PROJECT_SOURCE_DIR}/tests/wcw"
+    target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/include/librecomp" "${PROJECT_SOURCE_DIR}/../N64Recomp/include" "${PROJECT_SOURCE_DIR}/tests/wcw"
         "${PROJECT_SOURCE_DIR}/../ultramodern/include" "${PROJECT_SOURCE_DIR}/../thirdparty/concurrentqueue" "${PROJECT_SOURCE_DIR}/../thirdparty")
     target_link_libraries(librecomp_wcw_tests PRIVATE miniz)
     set(LIBRECOMP_WCW_TESTS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/librecomp_wcw_tests.passed")

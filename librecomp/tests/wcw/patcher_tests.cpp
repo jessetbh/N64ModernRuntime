@@ -6,6 +6,7 @@
 // librecomp build (LIBRECOMP_WCW_TESTS); a failure fails the build.
 
 #include "librecomp/patcher.hpp"
+#include "recompiler/runs_off_end.h"
 
 #include <cstdint>
 #include <string>
@@ -108,4 +109,22 @@ TEST_CASE("patcher_still_reports_a_bad_header_as_invalid") {
     patch[0] = 'X';
     Bytes out;
     CHECK(patch_rom(rom, patch, out) == PatcherResult::InvalidPatchFile);
+}
+
+// aki-roadmap#173: House Party Mixtape's hook returns to 0x8001E340, one word before func_8001E344. With no tail call the
+// generated code ran into whatever follows the batch (the first switch error stub).
+TEST_CASE("runs_off_end_counts_a_one_word_function") {
+    using N64Recomp::function_runs_off_end;
+    const uint32_t slti = 0x2A220004, nop = 0, j = 0x08000000, jr_ra = 0x03E00008, b = 0x10000002, eret = 0x42000018;
+    CHECK(function_runs_off_end(1, slti, 0, false));
+    CHECK(function_runs_off_end(1, nop, 0, false));
+    CHECK(!function_runs_off_end(1, j, 0, false));
+    CHECK(!function_runs_off_end(1, jr_ra, 0, false));
+    CHECK(!function_runs_off_end(1, eret, 0, false));
+    CHECK(!function_runs_off_end(0, 0, 0, false));
+    // The rules for longer functions stay: a delay slot after a jump ends, a branch landing on it runs on (aki-roadmap#76).
+    CHECK(function_runs_off_end(2, slti, nop, false));
+    CHECK(!function_runs_off_end(2, nop, j, false));
+    CHECK(function_runs_off_end(2, nop, j, true));
+    CHECK(!function_runs_off_end(2, b, nop, true));
 }
