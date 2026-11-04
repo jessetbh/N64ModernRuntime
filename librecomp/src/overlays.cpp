@@ -156,6 +156,16 @@ const SectionTableEntry& recomp::overlays::get_code_section(uint16_t code_sectio
     return sections_info.code_sections[code_section_index];
 }
 
+bool recomp::overlays::is_section_loaded(uint16_t code_section_index) {
+    const int32_t linked = (int32_t)sections_info.code_sections[code_section_index].ram_addr;
+    for (const LoadedSection& ls : loaded_sections) {
+        if ((ls.section_table_index == code_section_index) && (ls.loaded_ram_addr == linked)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void recomp::overlays::add_loaded_function(int32_t ram, recomp_func_t* func) {
     func_map[ram] = func;
 }
