@@ -38,6 +38,7 @@ add_library(librecomp STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/mod_enable_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/entry_prologue_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/regen_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/live_code_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion_codes.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion_rules.cpp"
@@ -123,6 +124,8 @@ if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
         "${PROJECT_SOURCE_DIR}/src/patcher.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/regen_rules_tests.cpp"
         "${PROJECT_SOURCE_DIR}/src/regen_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/live_code_rules_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/live_code_rules.cpp"
     )
     target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/include/librecomp" "${PROJECT_SOURCE_DIR}/../N64Recomp/include" "${PROJECT_SOURCE_DIR}/tests/wcw"
         "${PROJECT_SOURCE_DIR}/../ultramodern/include" "${PROJECT_SOURCE_DIR}/../thirdparty/concurrentqueue" "${PROJECT_SOURCE_DIR}/../thirdparty")

@@ -38,6 +38,8 @@ namespace recomp {
         // [wcw romhack] The registered code sections (functions with their ROM ranges).
         size_t num_code_sections();
         const SectionTableEntry& get_code_section(uint16_t code_section_index);
+        // [wcw fullconv] Is this code section loaded at the address it was linked for? (aki-roadmap#187)
+        bool is_section_loaded(uint16_t code_section_index);
         recomp_func_t* get_func_by_section_rom_function_vram(uint32_t section_rom, uint32_t function_vram);
         bool get_func_entry_by_section_index_function_offset(uint16_t code_section_index, uint32_t function_offset, FuncEntry& func_out);
         recomp_func_t* get_func_by_section_index_function_offset(uint16_t code_section_index, uint32_t function_offset);

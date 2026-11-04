@@ -10,6 +10,7 @@
 
 #include "librecomp/conversion.hpp"
 #include "librecomp/conversion_codes.hpp"
+#include "librecomp/live_code_rules.hpp"
 #include "librecomp/files.hpp"
 #include "librecomp/game.hpp"
 #include "ultramodern/error_handling.hpp"
@@ -356,6 +357,7 @@ namespace recomp::mods {
     void apply_active_native_codes(uint8_t *rdram, uint32_t rdram_size) {
         if (active_native_codes_ready()) {
             conversion::codes::apply(native_codes, rdram, rdram_size);
+            live_codes::after_apply(native_codes, rdram, rdram_size);
         }
     }
 }
