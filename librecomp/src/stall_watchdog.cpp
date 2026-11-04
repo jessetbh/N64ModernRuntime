@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
@@ -161,7 +162,9 @@ namespace {
         std::string game{};
         if ((addr >= text_start) && (addr < text_end) && !funcs.empty()) {
             auto it = std::upper_bound(funcs.begin(), funcs.end(), uintptr_t(addr), [](uintptr_t a, const NativeFunc& f) { return a < f.native; });
-            if (it != funcs.begin()) {
+            // Past this it's the port's own code, which only happens to sit after a recompiled function.
+            constexpr uint64_t MaxFuncBytes = 0x20000;
+            if ((it != funcs.begin()) && (addr - std::prev(it)->native < MaxFuncBytes)) {
                 --it;
                 char text[64];
                 snprintf(text, sizeof(text), " ~func_%08X+0x%llX", it->vram, (unsigned long long)(addr - it->native));
