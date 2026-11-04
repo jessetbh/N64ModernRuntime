@@ -52,10 +52,13 @@ namespace recomp::mods::live_codes {
         uint32_t end;
     };
 
-    // Does a watched word now hold a j or jal the ROM's word didn't, to an address outside these ranges? Such a word
-    // hooks into code the pack puts in RAM. A pack's hook can go live before that code is there, and following it
-    // crashes (Legends' Extra Attires, Body Shapes and Ring Ropes, also left out by aki-conv bake-codes), so the version
-    // isn't used.
+    bool in_code_ranges(uint32_t addr, std::span<const CodeRange> code);
+
+    // Does a watched word now leave the function in a way the ROM's word didn't: a j or jal outside these ranges, a
+    // branch outside the function, or a jr or jalr through a register other than ra? Such a word hooks into code the
+    // pack puts in RAM. A pack's hook can go live before that code is there, and following it crashes (Legends' Extra
+    // Attires, Body Shapes and Ring Ropes, also left out by aki-conv bake-codes), so the version isn't used. A jr built
+    // from lui/ori is caught by its jr only if the pack writes the jr.
     bool hooks_outside_code(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom, std::span<const CodeRange> code);
 
     // A key for the current values of the watched words. Never 0 (0 means "the static function").
@@ -64,7 +67,7 @@ namespace recomp::mods::live_codes {
     struct FunctionState {
         uint64_t current = 0;                  // the key of the version running; 0 = static
         std::unordered_set<uint64_t> compiled; // keys with a compiled version
-        std::unordered_set<uint64_t> failed;   // keys that can't be compiled: not tried again
+        std::unordered_set<uint64_t> failed;   // keys that can't run (a hook, or it won't compile): not tried again
         bool refused = false;                  // never switched (mod hook, entry prologue, repaired under Refuse...)
     };
 
@@ -73,11 +76,11 @@ namespace recomp::mods::live_codes {
 
     enum class Action {
         None,          // already right, or nothing may be done
-        ToStatic,      // the words match the ROM, or the section isn't loaded: back to the static function
+        ToStatic,      // the words match the ROM, the section isn't loaded, or this content can't run: back to static
         UseCompiled,   // a compiled version exists for this content
         Compile,       // new content, compile it
         Deferred,      // new content, but this pass has used its compile budget: try on the next pass
-        AtCap,         // new content, but the function has MaxVersionsPerFunction versions: stay on the current one
+        AtCap,         // new content, but MaxVersionsPerFunction contents were tried: stay on the current one
     };
 
     Action decide(const FunctionState &state, bool section_loaded, bool at_rom, uint64_t key, int compiles_left);

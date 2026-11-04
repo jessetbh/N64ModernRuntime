@@ -95,22 +95,33 @@ namespace recomp::mods::live_codes {
         return true;
     }
 
+    bool in_code_ranges(uint32_t addr, std::span<const CodeRange> code) {
+        for (const CodeRange &range : code) {
+            if ((addr >= range.start) && (addr < range.end)) return true;
+        }
+
+        return false;
+    }
+
     bool hooks_outside_code(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom, std::span<const CodeRange> code) {
         for (uint32_t addr : watch.words) {
-            uint32_t ram_word, rom_word;
-            if (!read_rdram_word(rdram, rdram_size, addr, ram_word) || !read_rom_word(rom, watch.func.rom + (addr - watch.func.vram), rom_word)) {
+            uint32_t w, rom_word;
+            if (!read_rdram_word(rdram, rdram_size, addr, w) || !read_rom_word(rom, watch.func.rom + (addr - watch.func.vram), rom_word)) {
                 continue;
             }
 
-            const uint32_t op = ram_word >> 26;
-            if ((ram_word == rom_word) || ((op != 2) && (op != 3))) continue;
-            const uint32_t target = ((addr + 4) & 0xF0000000u) | ((ram_word & 0x03FFFFFFu) << 2);
-            bool known = false;
-            for (const CodeRange &range : code) {
-                known = known || ((target >= range.start) && (target < range.end));
+            if (w == rom_word) continue;
+            const uint32_t op = w >> 26, rs = (w >> 21) & 31, rt = (w >> 16) & 31, funct = w & 0x3F;
+            if ((op == 2) || (op == 3)) {
+                if (!in_code_ranges(((addr + 4) & 0xF0000000u) | ((w & 0x03FFFFFFu) << 2), code)) return true;
             }
-
-            if (!known) return true;
+            else if ((op == 0) && ((funct == 0x08) || (funct == 0x09))) {
+                if (rs != 31) return true;
+            }
+            else if (((op >= 4) && (op <= 7)) || ((op >= 0x14) && (op <= 0x17)) || ((op == 1) && ((rt <= 3) || ((rt >= 0x10) && (rt <= 0x13)))) || ((op == 0x11) && (rs == 8))) {
+                const uint32_t target = addr + 4 + uint32_t(int32_t(int16_t(w & 0xFFFF)) * 4);
+                if ((target < watch.func.vram) || (target >= (watch.func.vram + watch.func.size))) return true;
+            }
         }
 
         return false;
@@ -135,9 +146,13 @@ namespace recomp::mods::live_codes {
             return (state.current != 0) ? Action::ToStatic : Action::None;
         }
 
-        if ((key == state.current) || state.failed.contains(key)) return Action::None;
+        if (state.failed.contains(key)) {
+            return (state.current != 0) ? Action::ToStatic : Action::None;
+        }
+
+        if (key == state.current) return Action::None;
         if (state.compiled.contains(key)) return Action::UseCompiled;
-        if (state.compiled.size() >= MaxVersionsPerFunction) return Action::AtCap;
+        if ((state.compiled.size() + state.failed.size()) >= MaxVersionsPerFunction) return Action::AtCap;
         return (compiles_left > 0) ? Action::Compile : Action::Deferred;
     }
 

@@ -108,15 +108,41 @@ TEST_CASE("live codes: RDRAM words compare with the big-endian ROM") {
     CHECK(!watched_match_rom(w, m.rdram.data(), 16, m.rom));
 }
 
-TEST_CASE("live codes: a change in an unwatched word doesn't count as a code write, but marks foreign content") {
+TEST_CASE("live codes: an unwatched word is not a code write, it marks foreign content") {
     Memory m;
     const Watch w = watch_word1();
     CHECK(others_match_rom(w, m.rdram.data(), 16, m.rom));
-    m.set_ram(1, 0x3C012FE0u); // the watched word: still this function's code
-    CHECK(others_match_rom(w, m.rdram.data(), 16, m.rom));
-    m.set_ram(2, 0);
-    CHECK(watched_match_rom(watch_word1(), m.rdram.data(), 16, m.rom) == false);
+    m.set_ram(2, 0); // unwatched only
+    CHECK(watched_match_rom(w, m.rdram.data(), 16, m.rom));
     CHECK(!others_match_rom(w, m.rdram.data(), 16, m.rom));
+}
+
+TEST_CASE("live codes: a change in the watched word is still this function's code") {
+    Memory m;
+    const Watch w = watch_word1();
+    m.set_ram(1, 0x3C012FE0u);
+    CHECK(others_match_rom(w, m.rdram.data(), 16, m.rom));
+    CHECK(!watched_match_rom(w, m.rdram.data(), 16, m.rom));
+}
+
+TEST_CASE("live codes: others_match_rom fails on words out of range") {
+    Memory m;
+    const Watch past_ram{ FunctionSpan{ 0x80000000u, 0, 32, 0 }, { 0x80000004u } };
+    CHECK(!others_match_rom(past_ram, m.rdram.data(), 16, m.rom));
+    const Watch past_rom{ FunctionSpan{ 0x80000000u, 0xFFFFFFF0u, 16, 0 }, { 0x80000004u } };
+    CHECK(!others_match_rom(past_rom, m.rdram.data(), 16, m.rom));
+}
+
+TEST_CASE("live codes: nested function spans each get the word (No Mercy 0x80112FE0 holds 0x801131AC)") {
+    const std::vector<uint32_t> words = { 0x80113288u };
+    const std::vector<FunctionSpan> functions = {
+        { 0x80112FE0u, 0x1000, 808, 1 },
+        { 0x801131ACu, 0x11CC, 348, 2 },
+    };
+    const std::vector<Watch> watches = build_watches(words, functions);
+    CHECK(watches.size() == 2);
+    CHECK(watches[0].func.id == 1);
+    CHECK(watches[1].func.id == 2);
 }
 
 TEST_CASE("live codes: out-of-range words never match") {
@@ -143,7 +169,7 @@ TEST_CASE("live codes: the content key follows the watched words only and is nev
     CHECK(content_key(w, m.rdram.data(), 16) == stock);
 }
 
-TEST_CASE("live codes: a hook into RAM outside known code is caught, in either half written") {
+TEST_CASE("live codes: a jump into RAM outside known code is caught") {
     Memory m;
     const Watch w = watch_word1();
     const std::vector<CodeRange> code = { { 0x80000000u, 0x80100000u } };
@@ -158,6 +184,62 @@ TEST_CASE("live codes: a hook into RAM outside known code is caught, in either h
     CHECK(!hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
     m.set_ram(1, 0x3C012FE0u);                                       // an immediate, not a jump
     CHECK(!hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+}
+
+TEST_CASE("live codes: a hook written in two halves is judged by the word it makes") {
+    Memory m;
+    const Watch w = watch_word1();
+    const std::vector<CodeRange> code = { { 0x80000000u, 0x80100000u } };
+    m.set_ram(1, 0x080F3E49u); // the high half written, low half stock: j 0x803CF924
+    CHECK(hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+    m.set_ram(1, 0x3C01801Du); // the low half written, high half stock: a lui, no hook yet
+    CHECK(!hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+}
+
+TEST_CASE("live codes: a branch out of the function is a hook, one inside it isn't") {
+    Memory m;
+    const Watch w = watch_word1(); // 0x80000000..0x80000010, the word at 0x80000004
+    const std::vector<CodeRange> code = { { 0x80000000u, 0x80100000u } };
+    m.set_ram(1, 0x10000001u); // b +1: 0x8000000C, inside
+    CHECK(!hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+    m.set_ram(1, 0x10000010u); // b past the end, though in known code
+    CHECK(hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+    m.set_ram(1, 0x1000FFF0u); // b back before the start
+    CHECK(hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+    m.set_ram(1, 0x04410010u); // bgez out
+    CHECK(hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+    m.set_ram(1, 0x54400010u); // bnel out
+    CHECK(hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+    m.set_ram(1, 0x45000010u); // bc1f out
+    CHECK(hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+}
+
+TEST_CASE("live codes: jr and jalr count as hooks unless through ra") {
+    Memory m;
+    const Watch w = watch_word1();
+    const std::vector<CodeRange> code = { { 0x80000000u, 0x80100000u } };
+    m.set_ram(1, 0x00200008u); // jr at
+    CHECK(hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+    m.set_ram(1, 0x0320F809u); // jalr t9
+    CHECK(hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+    m.set_ram(1, 0x03E00008u); // jr ra: an early return
+    CHECK(!hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
+}
+
+TEST_CASE("live codes: hooks_outside_code skips words out of range") {
+    Memory m;
+    const std::vector<CodeRange> code = { { 0x80000000u, 0x80100000u } };
+    const Watch past_ram{ FunctionSpan{ 0x80000000u, 0, 32, 0 }, { 0x80000010u } };
+    CHECK(!hooks_outside_code(past_ram, m.rdram.data(), 16, m.rom, code));
+}
+
+TEST_CASE("live codes: code ranges include their start and not their end") {
+    const std::vector<CodeRange> code = { { 0x80001000u, 0x80002000u }, { 0x80100000u, 0x80100010u } };
+    CHECK(in_code_ranges(0x80001000u, code));
+    CHECK(in_code_ranges(0x80100008u, code));
+    CHECK(!in_code_ranges(0x80002000u, code));
+    CHECK(!in_code_ranges(0x803E0074u, code));
+    CHECK(!in_code_ranges(0x80001000u, std::vector<CodeRange>{}));
 }
 
 TEST_CASE("live codes: an unchanged jump in the ROM isn't a hook") {
@@ -194,13 +276,23 @@ TEST_CASE("live codes: a section that unloads goes back to static at once") {
     CHECK(decide(s, false, false, 5, 8) == Action::ToStatic);
 }
 
-TEST_CASE("live codes: failed content isn't retried, and the function stays on what it runs") {
+TEST_CASE("live codes: content that can't run isn't retried, and a running version goes back to static") {
     FunctionState s;
     s.failed.insert(5);
-    CHECK(decide(s, true, false, 5, 8) == Action::None);
+    CHECK(decide(s, true, false, 5, 8) == Action::None); // already static
     s.compiled.insert(6);
     s.current = 6;
-    CHECK(decide(s, true, false, 5, 8) == Action::None);
+    CHECK(decide(s, true, false, 5, 8) == Action::ToStatic); // a half-written hook's version doesn't keep running
+    s.current = 0;
+    CHECK(decide(s, true, false, 6, 8) == Action::UseCompiled); // its other content still runs
+}
+
+TEST_CASE("live codes: failed content counts toward the cap") {
+    FunctionState s;
+    for (uint64_t k = 1; k <= MaxVersionsPerFunction; k++) s.failed.insert(k + 100);
+    CHECK(decide(s, true, false, 5, 8) == Action::AtCap);
+    s.failed.erase(101);
+    CHECK(decide(s, true, false, 5, 8) == Action::Compile);
 }
 
 TEST_CASE("live codes: the compile budget defers and the version cap stops") {
