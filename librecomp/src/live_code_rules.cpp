@@ -127,6 +127,13 @@ namespace recomp::mods::live_codes {
         return false;
     }
 
+    ExitCheck check_exits(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom,
+        std::span<const CodeRange> all, std::span<const CodeRange> loaded)
+    {
+        if (hooks_outside_code(watch, rdram, rdram_size, rom, all)) return ExitCheck::Never;
+        return hooks_outside_code(watch, rdram, rdram_size, rom, loaded) ? ExitCheck::NotNow : ExitCheck::Fine;
+    }
+
     uint64_t content_key(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size) {
         uint64_t h = 0xCBF29CE484222325ull;
         for (uint32_t addr : watch.words) {

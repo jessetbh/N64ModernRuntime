@@ -242,6 +242,22 @@ TEST_CASE("live codes: code ranges include their start and not their end") {
     CHECK(!in_code_ranges(0x80001000u, std::vector<CodeRange>{}));
 }
 
+TEST_CASE("live codes: a jump to an unloaded overlay is not now, a jump outside all code is never") {
+    Memory m;
+    const Watch w = watch_word1();
+    const std::vector<CodeRange> all = { { 0x80000000u, 0x80100000u }, { 0x80106760u, 0x80140000u } };
+    const std::vector<CodeRange> loaded = { { 0x80000000u, 0x80100000u } };
+    CHECK(check_exits(w, m.rdram.data(), 16, m.rom, all, loaded) == ExitCheck::Fine); // stock
+    m.set_ram(1, 0x0C041DE0u); // jal 0x80107780, in the overlay slot
+    CHECK(check_exits(w, m.rdram.data(), 16, m.rom, all, loaded) == ExitCheck::NotNow);
+    CHECK(check_exits(w, m.rdram.data(), 16, m.rom, all, all) == ExitCheck::Fine);    // the same word once it's loaded
+    m.set_ram(1, 0x080F801Du); // j 0x803E0074, the pack's RAM
+    CHECK(check_exits(w, m.rdram.data(), 16, m.rom, all, loaded) == ExitCheck::Never);
+    CHECK(check_exits(w, m.rdram.data(), 16, m.rom, all, all) == ExitCheck::Never);
+    m.set_ram(1, 0x08000010u); // j into loaded code
+    CHECK(check_exits(w, m.rdram.data(), 16, m.rom, all, loaded) == ExitCheck::Fine);
+}
+
 TEST_CASE("live codes: an unchanged jump in the ROM isn't a hook") {
     Memory m;
     const uint32_t stock_jump = 0x080F801Du;

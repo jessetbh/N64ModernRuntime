@@ -2587,11 +2587,26 @@ namespace {
         return !f.patched;
     }
 
-    // A version's lookup of an address with no function: a version can re-enter a function in the middle, so code inside
-    // the sections is compiled. Anywhere else stays the fatal "Failed to find function": RDRAM there isn't code, and
+    // The code in memory now: the loaded sections and a de-relinked hack's ranges.
+    std::vector<live_codes::CodeRange> live_loaded_code() {
+        std::vector<live_codes::CodeRange> code{};
+        for (size_t section_index = 0; section_index < recomp::overlays::num_code_sections(); section_index++) {
+            if (recomp::overlays::is_section_loaded(static_cast<uint16_t>(section_index))) {
+                const SectionTableEntry& section = recomp::overlays::get_code_section(static_cast<uint16_t>(section_index));
+                code.push_back(live_codes::CodeRange{ section.ram_addr, section.ram_addr + section.size });
+            }
+        }
+        for (const auto& [start, end] : relink_code_ranges) {
+            code.push_back(live_codes::CodeRange{ start, end });
+        }
+        return code;
+    }
+
+    // A version's lookup of an address with no function: a version can re-enter a function in the middle, so code in a
+    // loaded section is compiled. Anywhere else stays the fatal "Failed to find function": RDRAM there isn't code, and
     // compiling it would chain from one stretch of RAM to the next without ever yielding.
     recomp_func_t* live_missing_function(int32_t addr) {
-        return live_codes::in_code_ranges(static_cast<uint32_t>(addr), live_code_ranges) ? compile_ram_function(addr) : nullptr;
+        return live_codes::in_code_ranges(static_cast<uint32_t>(addr), live_loaded_code()) ? compile_ram_function(addr) : nullptr;
     }
 
     bool live_setup(const std::vector<recomp::mods::conversion::codes::Code>& codes) {
@@ -2704,6 +2719,17 @@ void recomp::mods::live_codes::after_apply(const std::vector<conversion::codes::
             }
         }
         else {
+            const ExitCheck exits = check_exits(f.watch, rdram, rdram_size, rom, live_code_ranges, live_loaded_code());
+            if (exits == ExitCheck::Never) {
+                f.state.failed.insert(key);
+                live_stats.hooks++;
+                fprintf(stderr, "[live codes] 0x%08X: hooks into RAM outside known code; not compiled\n", vram);
+                continue;
+            }
+            if (exits == ExitCheck::NotNow) {
+                live_stats.deferred++;
+                continue; // not remembered: its overlay may load later
+            }
             if (action == Action::Compile) {
                 // Not remembered as failed: this passes when the real code is back, with the same key.
                 if (!others_match_rom(f.watch, rdram, rdram_size, rom)) {
@@ -2714,39 +2740,23 @@ void recomp::mods::live_codes::after_apply(const std::vector<conversion::codes::
                     }
                     continue;
                 }
-                std::vector<CodeRange> loaded_code{};
-                for (size_t section_index = 0; section_index < recomp::overlays::num_code_sections(); section_index++) {
-                    if (recomp::overlays::is_section_loaded(static_cast<uint16_t>(section_index))) {
-                        const SectionTableEntry& section = recomp::overlays::get_code_section(static_cast<uint16_t>(section_index));
-                        loaded_code.push_back(CodeRange{ section.ram_addr, section.ram_addr + section.size });
-                    }
-                }
-                for (const auto& [range_start, range_end] : relink_code_ranges) {
-                    loaded_code.push_back(CodeRange{ range_start, range_end });
-                }
-                if (hooks_outside_code(f.watch, rdram, rdram_size, rom, loaded_code)) {
-                    f.state.failed.insert(key);
-                    live_stats.hooks++;
-                    fprintf(stderr, "[live codes] 0x%08X: hooks into RAM outside known code; not compiled\n", vram);
-                    continue;
-                }
-                // (a de-relinked hack already has compile_ram_function as its handler)
-                if (relink_rdram == nullptr) {
-                    relink_rdram = rdram;
-                    recomp::overlays::set_missing_function_handler(live_missing_function);
-                }
                 // The static version is a stub for these (cop0, cache: the port's config stubs them), and a version from
                 // RDRAM would run into a break.
                 bool stubbed_ops = false;
                 for (uint32_t offset = 0; (offset + 4) <= f.watch.func.size && !stubbed_ops; offset += 4) {
                     const uint32_t word = *reinterpret_cast<const uint32_t*>(rdram + (vram + offset - 0x80000000u));
-                    stubbed_ops = word_not_game_code(word) || (word >> 26) == 0x2F;
+                    stubbed_ops = word_not_game_code(word) || (word >> 26) == 0x10 || (word >> 26) == 0x2F;
                 }
                 if (stubbed_ops) {
                     f.state.failed.insert(key);
                     live_stats.failed++;
                     fprintf(stderr, "[live codes] 0x%08X holds instructions the recompiler can't run; it stays static\n", vram);
                     continue;
+                }
+                // (a de-relinked hack already has compile_ram_function as its handler)
+                if (relink_rdram == nullptr) {
+                    relink_rdram = rdram;
+                    recomp::overlays::set_missing_function_handler(live_missing_function);
                 }
                 compiles_left--;
                 const auto compile_start = clock::now();

@@ -61,6 +61,16 @@ namespace recomp::mods::live_codes {
     // from lui/ori is caught by its jr only if the pack writes the jr.
     bool hooks_outside_code(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom, std::span<const CodeRange> code);
 
+    // What to do about a version's exits, given every section's code (all) and what's in memory now (loaded).
+    enum class ExitCheck {
+        Fine,     // run it
+        NotNow,   // it jumps to an overlay that isn't loaded: not now, but this content may run later
+        Never,    // it jumps outside all known code: this content can't run
+    };
+
+    ExitCheck check_exits(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom,
+        std::span<const CodeRange> all, std::span<const CodeRange> loaded);
+
     // A key for the current values of the watched words. Never 0 (0 means "the static function").
     uint64_t content_key(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size);
 
