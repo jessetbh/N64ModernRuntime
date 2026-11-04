@@ -3,6 +3,7 @@
 #include <unordered_set>
 #include <map>
 #include <array>
+#include <atomic>
 #include <fstream>
 #include <sstream>
 #include <functional>
@@ -2517,6 +2518,16 @@ namespace {
     LiveStats live_stats{};
     bool live_switch_log = false;
 
+    // Every compiled version, for the stall watchdog: entries are complete before the count moves past them.
+    struct LiveVersionEntry {
+        uintptr_t start;
+        uint32_t vram;
+    };
+    constexpr size_t MaxLiveVersionEntries = 4096;
+    constexpr uintptr_t MaxLiveVersionBytes = 0x40000;
+    std::array<LiveVersionEntry, MaxLiveVersionEntries> live_version_entries{};
+    std::atomic<size_t> live_version_count{ 0 };
+
     uint8_t* live_stub_alloc(const void* near_addr) {
         constexpr size_t block_size = 0x10000;
         static uint8_t* block = nullptr;
@@ -2779,6 +2790,10 @@ void recomp::mods::live_codes::after_apply(const std::vector<conversion::codes::
                 }
                 f.versions[key] = version;
                 f.state.compiled.insert(key);
+                if (const size_t n = live_version_count.load(); n < MaxLiveVersionEntries) {
+                    live_version_entries[n] = LiveVersionEntry{ reinterpret_cast<uintptr_t>(version), vram };
+                    live_version_count.store(n + 1);
+                }
                 fprintf(stderr, "[live codes] 0x%08X (%u bytes) version %zu compiled in %.2f ms (total %llu compiles, %.1f ms)%s\n",
                     vram, f.watch.func.size, f.state.compiled.size(), ms, (unsigned long long)live_stats.compiles, live_stats.compile_ms,
                     f.repaired ? "; repaired by the port, this version loses the repair" : "");
@@ -2802,8 +2817,46 @@ void recomp::mods::live_codes::after_apply(const std::vector<conversion::codes::
         live_print_stats();
     }
 }
+
+bool recomp::mods::live_codes::version_at(uint64_t addr, uint32_t& vram) {
+    uintptr_t best = 0;
+    const size_t count = live_version_count.load();
+    for (size_t i = 0; i < count; i++) {
+        const LiveVersionEntry& e = live_version_entries[i];
+        if ((e.start <= addr) && (addr - e.start < MaxLiveVersionBytes) && (e.start > best)) {
+            best = e.start;
+            vram = e.vram;
+        }
+    }
+    return best != 0;
+}
+
+void recomp::mods::live_codes::version_bounds(uintptr_t& low, uintptr_t& high) {
+    low = 0;
+    high = 0;
+    const size_t count = live_version_count.load();
+    for (size_t i = 0; i < count; i++) {
+        const uintptr_t start = live_version_entries[i].start;
+        low = (low == 0) ? start : std::min(low, start);
+        high = std::max(high, start + MaxLiveVersionBytes);
+    }
+}
+
+void recomp::mods::live_codes::print_stall_state() {
+    live_print_stats();
+    fprintf(stderr, "[stall] live versions running:");
+    for (const LiveFunction& f : live_functions) {
+        if (f.patched) {
+            fprintf(stderr, " 0x%08X", f.watch.func.vram);
+        }
+    }
+    fprintf(stderr, "\n");
+}
 #else
 void recomp::mods::live_codes::after_apply(const std::vector<conversion::codes::Code>&, uint8_t*, uint32_t) {}
+bool recomp::mods::live_codes::version_at(uint64_t, uint32_t&) { return false; }
+void recomp::mods::live_codes::version_bounds(uintptr_t& low, uintptr_t& high) { low = 0; high = 0; }
+void recomp::mods::live_codes::print_stall_state() {}
 #endif
 
 // [wcw romhack] A ROM patch can change code as well as data, but the recompiled functions are
