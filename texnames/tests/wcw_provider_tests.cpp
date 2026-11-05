@@ -185,6 +185,111 @@ TEST_CASE("provider: a 32-bit texture has a Rice name only (Jabo's rule for them
     CHECK(!decodeKey(key).jaboValid);
 }
 
+TEST_CASE("provider: a tile load's start comes from its 10.2 uls and ult") {
+    const Rdram rdram = gradientRdram();
+    TextureNameInput input = tileInput(rdram, 0x1000, TestFmtRGBA, TestSiz16b, 4, 4);
+    input.load.uls = 1 << 2;
+    input.load.ult = 1 << 2;
+    input.load.lrs = (1 + 3) << 2;
+    input.load.lrt = (1 + 3) << 2;
+
+    TextureNameKey key;
+    provider().computeKey(input, key);
+    const WcwRice::TextureKey names = decodeKey(key);
+    CHECK(names.valid);
+    // One 2-byte texel across, one 8-byte row down.
+    CHECK(names.crc == WcwRice::riceCRC32(&rdram.bytes[0x1000 + 2 + 8], 4, 4, TestSiz16b, 8));
+
+    uint8_t texels[32];
+    for (uint32_t y = 0; y < 4; y++) {
+        for (uint32_t x = 0; x < 8; x++) {
+            texels[y * 8 + x] = rdram.bytes[(0x1000 + 2 + 8 + y * 8 + x) ^ 3];
+        }
+    }
+
+    WcwJabo::Digest digest;
+    CHECK(WcwJabo::textureDigest(TestFmtRGBA, TestSiz16b, texels, 4, 4, 8, nullptr, digest));
+    CHECK(memcmp(names.jabo, digest.bytes, 16) == 0);
+}
+
+TEST_CASE("provider: a block load takes its size from the draw tile, its stride from the line, and an unshifted ult") {
+    const Rdram rdram = gradientRdram();
+    TextureNameInput input = tileInput(rdram, 0x1000, TestFmtRGBA, TestSiz16b, 4, 4);
+    input.load.type = TextureNameLoad::Type::Block;
+    input.load.ult = 1;
+    input.load.lrs = 15;
+    input.load.lrt = 0;     // No dxt: the stride is the tile's line.
+    input.drawTile.line = 1;
+
+    TextureNameKey key;
+    provider().computeKey(input, key);
+    const WcwRice::TextureKey names = decodeKey(key);
+    CHECK(names.valid);
+    CHECK(names.crc == WcwRice::riceCRC32(&rdram.bytes[0x1000 + 8], 4, 4, TestSiz16b, 8));
+
+    uint8_t texels[32];
+    for (uint32_t i = 0; i < 32; i++) {
+        texels[i] = rdram.bytes[(0x1000 + 8 + i) ^ 3];
+    }
+
+    WcwJabo::Digest digest;
+    CHECK(WcwJabo::textureDigest(TestFmtRGBA, TestSiz16b, texels, 4, 4, 8, nullptr, digest));
+    CHECK(memcmp(names.jabo, digest.bytes, 16) == 0);
+}
+
+TEST_CASE("provider: a 4/8-bit texture in a non-CI format has a palette CRC only with a TLUT on") {
+    const Rdram rdram = gradientRdram();
+    const uint8_t FmtIA = 3;
+    TextureNameInput input = tileInput(rdram, 0x1000, FmtIA, TestSiz8b, 4, 4);
+    TextureNameKey key;
+    provider().computeKey(input, key);
+    CHECK(!decodeKey(key).hasPalette);
+    input.tlut = 1;
+    provider().computeKey(input, key);
+    CHECK(decodeKey(key).hasPalette);
+}
+
+TEST_CASE("provider: a CI4 texture's Rice palette CRC uses the tile's palette bank") {
+    Rdram rdram;
+    for (uint32_t i = 0; i < 8; i++) {
+        rdram.put(0x1000 + i, 0x01);
+    }
+
+    for (uint32_t i = 0; i < 512; i++) {
+        rdram.put(0x2000 + i, uint8_t(i));
+    }
+
+    TextureNameInput input = tileInput(rdram, 0x1000, TestFmtCI, TestSiz4b, 4, 4);
+    const TextureNamePaletteLoad loads[1] = { { 0, 256, 0x2000, 1 } };
+    input.paletteLoads = loads;
+    input.paletteLoadCount = 1;
+
+    TextureNameKey bank0, bank1;
+    provider().computeKey(input, bank0);
+    input.drawTile.palette = 1;
+    provider().computeKey(input, bank1);
+    CHECK(decodeKey(bank0).hasPalette);
+    CHECK(decodeKey(bank0).paletteCrc != decodeKey(bank1).paletteCrc);
+}
+
+TEST_CASE("provider: a Rice read that would start under 4 bytes into RDRAM gets no Rice name; its Jabo name still counts") {
+    const Rdram rdram = gradientRdram();
+    TextureNameKey key;
+    provider().computeKey(tileInput(rdram, 2, TestFmtRGBA, TestSiz16b, 4, 4), key);
+    CHECK(key.valid);
+    CHECK(!decodeKey(key).valid);
+    CHECK(decodeKey(key).jaboValid);
+}
+
+TEST_CASE("provider: textures over 1024 texels a side get no Jabo name") {
+    const Rdram rdram = gradientRdram();
+    TextureNameInput input = tileInput(rdram, 0x1000, TestFmtRGBA, TestSiz16b, 4, 4);
+    input.width = 1025;
+    TextureNameKey key;
+    provider().computeKey(input, key);
+    CHECK(!decodeKey(key).jaboValid);
+}
+
 TEST_CASE("provider: a pack with neither kind of name has no index") {
     CHECK(provider().createPackIndex(0, { "rt64.json", "a/0123456789abcdef.dds", "readme.txt" }) == nullptr);
     CHECK(provider().createPackIndex(0, {}) == nullptr);
