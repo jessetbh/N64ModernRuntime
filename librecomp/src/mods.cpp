@@ -1,3 +1,4 @@
+#include <limits>
 #include <span>
 #include <mutex>
 #include <unordered_set>
@@ -2532,6 +2533,9 @@ namespace {
     std::vector<LiveFunction> live_functions{};
     std::vector<live_codes::CodeRange> live_code_ranges{};
     std::vector<live_codes::CodeRange> live_pack_writes{}; // what the table can write: a hook may jump there
+    const std::vector<recomp::mods::conversion::codes::Code>* live_table = nullptr;
+    uint8_t* live_table_rdram = nullptr;
+    uint32_t live_table_rdram_size = 0;
     LiveStats live_stats{};
     bool live_switch_log = false;
 
@@ -2636,7 +2640,21 @@ namespace {
     // the next without ever yielding.
     recomp_func_t* live_missing_function(int32_t addr) {
         const uint32_t a = static_cast<uint32_t>(addr);
-        return (live_codes::in_code_ranges(a, live_loaded_code()) || live_codes::in_code_ranges(a, live_pack_writes)) ? compile_ram_function(addr) : nullptr;
+        if (live_codes::in_code_ranges(a, live_pack_writes)) {
+            // The table runs once per game frame, a GameShark once per VI. While the game loads there are no frames, and it
+            // clears and fills the RAM a pack's code and tables sit in (aki-roadmap#205: a 7-word cave compiled as 32 KB of
+            // whatever was there). So write the table again before entering its code, at most once a millisecond: a caller
+            // can enter hundreds of times in a loop, and a pass over a big table is a sizeable fraction of that.
+            using clock = std::chrono::steady_clock;
+            static std::atomic<int64_t> last_ns{ std::numeric_limits<int64_t>::min() / 2 };
+            const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now().time_since_epoch()).count();
+            if ((now - last_ns.load(std::memory_order_relaxed)) > 1000000) {
+                last_ns.store(now, std::memory_order_relaxed);
+                recomp::mods::conversion::codes::apply(*live_table, live_table_rdram, live_table_rdram_size);
+            }
+            return compile_ram_function(addr);
+        }
+        return live_codes::in_code_ranges(a, live_loaded_code()) ? compile_ram_function(addr) : nullptr;
     }
 
     bool live_setup(const std::vector<recomp::mods::conversion::codes::Code>& codes) {
@@ -2650,6 +2668,7 @@ namespace {
         const char* hooks_env = getenv("WCW_LIVE_HOOKS");
         if (hooks_env == nullptr || strcmp(hooks_env, "0") != 0) {
             live_pack_writes = live_codes::ranges_of_words(words);
+            live_table = &codes;
         }
 
         std::vector<live_codes::FunctionSpan> spans{};
@@ -2718,6 +2737,8 @@ void recomp::mods::live_codes::after_apply(const std::vector<conversion::codes::
     if (!enabled) {
         return;
     }
+    live_table_rdram = rdram;
+    live_table_rdram_size = rdram_size;
 
     const std::span<const uint8_t> rom = recomp::get_rom();
     const auto start = clock::now();
