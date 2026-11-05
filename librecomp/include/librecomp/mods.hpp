@@ -427,8 +427,7 @@ namespace recomp {
                 const std::string& mod_id,
                 std::span<const char> relink_json,
                 std::span<const uint8_t> patched_rom,
-                uint8_t* rdram,
-                int32_t entrypoint_address);
+                uint8_t* rdram);
             void dirty_mod_configuration_thread_process();
             void rebuild_mod_order_lookup();
 
