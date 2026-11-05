@@ -1834,6 +1834,10 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_mo
         recomp::set_rom_contents(std::move(patched_rom));
         rom_patch_save_subfolder = std::u8string{ reinterpret_cast<const char8_t*>(mod.manifest.mod_id.data()), mod.manifest.mod_id.size() };
 
+        // [wcw fullconv] aki-roadmap#213: init() copied the boot image (first 1MB) from the unpatched ROM
+        // before mods loaded, so read it again: hacks keep data there too (VPW64 English's wrestler names).
+        recomp::do_rom_read(rdram, game_entry.entrypoint_address, 0x10001000, 0x100000);
+
         // [wcw romhack] The ROM was replaced, so the decompressed view would reference the freed
         // unpatched ROM: point it at the patched contents (hooks are regenerated from it too).
         if (game_entry.has_compressed_code) {
@@ -1881,7 +1885,7 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_mo
         }
 
         if (relink_exists) {
-            std::vector<ModLoadErrorDetails> relink_errors = load_relink(mod.manifest.mod_id, relink_data, decompressed_rom, rdram, game_entry.entrypoint_address);
+            std::vector<ModLoadErrorDetails> relink_errors = load_relink(mod.manifest.mod_id, relink_data, decompressed_rom, rdram);
             if (!relink_errors.empty()) {
                 ret.insert(ret.end(), relink_errors.begin(), relink_errors.end());
                 unload_mods();
@@ -2993,14 +2997,12 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::regener
 //       is the address to register when it differs from the compile address "vram".
 //   "preload" / "zero": the Expansion-RAM payload the hack's entry hook copied with direct cart
 //       reads, done natively here instead.
-// The boot image (first 1MB) was copied from the unpatched ROM before mods loaded, so it is read
-// again from the patched ROM.
+// load_mods has already read the boot image (first 1MB) again from the patched ROM.
 std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_relink(
     const std::string& mod_id,
     std::span<const char> relink_json,
     std::span<const uint8_t> patched_rom,
-    uint8_t* rdram,
-    int32_t entrypoint_address)
+    uint8_t* rdram)
 {
     using json = nlohmann::json;
     auto fail = [&mod_id](const std::string& why) {
@@ -3020,8 +3022,6 @@ std::vector<recomp::mods::ModLoadErrorDetails> recomp::mods::ModContext::load_re
     if (j.value("direct_rom_reads", false)) {
         wcw_map_rom_k1(rdram);
     }
-
-    recomp::do_rom_read(rdram, entrypoint_address, 0x10001000, 0x100000);
 
     for (const json& z : j.value("zero", json::array())) {
         uint32_t ram = z.at("ram").get<uint32_t>();
