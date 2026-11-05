@@ -211,13 +211,14 @@ TEST_CASE("live codes: a jump into what the table writes is the pack's code, onc
     set(1, 0x08000007u);                   // j 0x8000001C: a target the table doesn't write, the old-revision case
     CHECK(hooks_outside_code(w, rdram.data(), 32, rom, code, pack));
     CHECK(check_exits(w, rdram.data(), 32, rom, code, code, pack) == ExitCheck::Never);
-    set(1, 0x03E00008u + (1u << 21));      // jr at: still refused, the table says nothing about where that goes
+    set(1, 0x00200008u);                   // jr at: still refused, the table says nothing about where that goes
     CHECK(hooks_outside_code(w, rdram.data(), 32, rom, code, pack));
 }
 
 TEST_CASE("live codes: written words become ranges") {
     const std::vector<CodeRange> r = ranges_of_words({ 0x80000108u, 0x80000100u, 0x80000104u, 0x80000104u, 0x80000200u });
-    REQUIRE(r.size() == 2);
+    CHECK(r.size() == 2);
+    if (r.size() != 2) return;
     CHECK(r[0].start == 0x80000100u);
     CHECK(r[0].end == 0x8000010Cu);
     CHECK(r[1].start == 0x80000200u);
