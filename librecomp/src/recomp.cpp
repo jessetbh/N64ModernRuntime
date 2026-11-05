@@ -16,6 +16,7 @@
 #include <charconv>
 
 #include "recomp.h"
+#include "librecomp/stall_rules.hpp"
 #include "librecomp/dd_breadcrumb.hpp"
 #include "librecomp/overlays.hpp"
 #include "librecomp/game.hpp"
@@ -1117,6 +1118,7 @@ void recomp::start(
 
         ultramodern::preinit(rdram, window_handle);
         preinit_done.store(true);
+        recomp::stall::start_watchdog(rdram); // [wcw] WCW_STALL_DUMP
 
         recomp_context context{};
 

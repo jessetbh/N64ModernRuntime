@@ -110,6 +110,13 @@ namespace recomp::mods::live_codes {
 
     // Runtime half (mods.cpp): call after each pass of the table, on the game thread that ran it.
     void after_apply(const std::vector<conversion::codes::Code> &codes, uint8_t *rdram, uint32_t rdram_size);
+
+    // For the stall watchdog (WCW_STALL_DUMP). version_at: the function whose compiled version holds this native address.
+    // version_bounds: the address range the compiled versions span, 0 if there are none. Neither locks: they're
+    // for the watchdog's capture, with the game threads suspended, so they read a fixed-size table.
+    bool version_at(uint64_t addr, uint32_t &vram);
+    void version_bounds(uintptr_t &low, uintptr_t &high);
+    void print_stall_state();
 }
 
 #endif

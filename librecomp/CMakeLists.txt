@@ -39,6 +39,8 @@ add_library(librecomp STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/entry_prologue_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/regen_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/live_code_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/stall_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/stall_watchdog.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion_codes.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion_rules.cpp"
@@ -124,6 +126,8 @@ if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
         "${PROJECT_SOURCE_DIR}/src/patcher.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/regen_rules_tests.cpp"
         "${PROJECT_SOURCE_DIR}/src/regen_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/stall_rules_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/stall_rules.cpp"
         "${PROJECT_SOURCE_DIR}/tests/wcw/live_code_rules_tests.cpp"
         "${PROJECT_SOURCE_DIR}/src/live_code_rules.cpp"
     )

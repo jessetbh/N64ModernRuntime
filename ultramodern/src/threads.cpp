@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <cassert>
 #include <string>
+#include <vector>
+#include <algorithm>
 
 #include "ultramodern/ultra64.h"
 #include "ultramodern/ultramodern.hpp"
@@ -743,6 +745,42 @@ void ultramodern::cleanup_thread(UltraThreadContext *cur_context) {
 
 void ultramodern::join_thread_cleaner_thread() {
     thread_cleaner_thread.join();
+}
+
+void ultramodern::print_game_threads(uint8_t* rdram) {
+    std::vector<int32_t> threads{};
+    {
+        std::lock_guard lock{wcw2k_context_map_mutex};
+        for (const auto& [thread, record] : wcw2k_context_map) {
+            threads.push_back(thread);
+        }
+    }
+    std::sort(threads.begin(), threads.end());
+    for (int32_t t_ : threads) {
+        const OSThread* t = TO_PTR(OSThread, t_);
+        fprintf(stderr, "[stall] game thread id=%d pri=%d state=%d struct=0x%08X sp=0x%08X queue=0x%08X",
+            t->id, t->priority, int(t->state), uint32_t(t_), uint32_t(t->sp), uint32_t(t->queue));
+        if (t->queue == ultramodern::running_queue) {
+            fprintf(stderr, " (running queue)");
+        }
+        else if (t->queue != NULLPTR) {
+            // A thread blocked on a message queue holds the address of its recv (+0) or send (+4) list.
+            const uint32_t at = uint32_t(t->queue) & ~3u;
+            if ((at >= 0x80000000u) && (at < 0x80800000u)) {
+                const uint32_t* words = reinterpret_cast<const uint32_t*>(rdram + (at - 0x80000000u));
+                fprintf(stderr, " words %08X %08X %08X %08X %08X %08X", words[0], words[1], words[2], words[3], words[4], words[5]);
+            }
+        }
+        fprintf(stderr, "\n");
+    }
+    fprintf(stderr, "[stall] running queue:");
+    PTR(OSThread) cur = ultramodern::thread_queue_peek(PASS_RDRAM ultramodern::running_queue);
+    for (int i = 0; (cur != NULLPTR) && (i < 16); i++) {
+        const OSThread* t = TO_PTR(OSThread, cur);
+        fprintf(stderr, " id=%d/pri=%d", t->id, t->priority);
+        cur = t->next;
+    }
+    fprintf(stderr, "\n");
 }
 
 // [wcw fix] Called after quit(). Running game threads park at their next OS call; blocked ones

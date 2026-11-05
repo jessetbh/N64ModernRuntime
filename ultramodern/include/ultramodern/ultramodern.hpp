@@ -148,6 +148,9 @@ void join_saving_thread();
 // OSTimers in rdram.
 void park_game_thread_if_quitting();
 bool park_game_threads(std::chrono::milliseconds timeout);
+// [wcw] Stall watchdog (librecomp stall_watchdog.cpp): every game thread's id, priority, state, the queue it waits on and
+// that queue's words, plus the running queue, as "[stall]" lines on stderr.
+void print_game_threads(uint8_t* rdram);
 void wake_external_message_waiters(int count);
 void join_timer_thread();
 
