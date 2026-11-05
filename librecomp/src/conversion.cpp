@@ -15,6 +15,8 @@
 #include "librecomp/game.hpp"
 #include "ultramodern/error_handling.hpp"
 
+extern "C" void wcw_commit_low_user_segment(uint8_t* rdram);   // recomp.cpp
+
 namespace {
     std::mutex conversion_mutex;
     std::optional<recomp::mods::conversion::Conversion> active;
@@ -356,6 +358,12 @@ namespace recomp::mods {
 
     void apply_active_native_codes(uint8_t *rdram, uint32_t rdram_size) {
         if (active_native_codes_ready()) {
+            // Packs are tested on lenient emulators, and their codes can drive the game down paths stock never takes: Some No
+            // Mercy Mod's Better Managers makes a manager act, whose target slot is 0xFFFF, and stock code then reads through a
+            // null pointer (aki-roadmap#194). As for de-relinked hacks, the low user segment reads as zero pages. Stock games,
+            // with no codes, keep faulting there.
+            static std::once_flag low_segment_once;
+            std::call_once(low_segment_once, [rdram]() { wcw_commit_low_user_segment(rdram); });
             conversion::codes::apply(native_codes, rdram, rdram_size);
             live_codes::after_apply(native_codes, rdram, rdram_size);
         }
