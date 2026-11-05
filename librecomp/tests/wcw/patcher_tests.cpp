@@ -6,6 +6,7 @@
 // librecomp build (LIBRECOMP_WCW_TESTS); a failure fails the build.
 
 #include "librecomp/patcher.hpp"
+#include "recompiler/jump_table_bound.h"
 #include "recompiler/runs_off_end.h"
 
 #include <cstdint>
@@ -113,6 +114,40 @@ TEST_CASE("patcher_still_reports_a_bad_header_as_invalid") {
 
 // aki-roadmap#173: House Party Mixtape's hook returns to 0x8001E340, one word before func_8001E344. With no tail call the
 // generated code ran into whatever follows the batch (the first switch error stub).
+// A hand-written switch head, as Function::words holds it: in ROM byte order (aki-roadmap#206).
+static uint32_t rom_order(uint32_t w) {
+    return (w >> 24) | ((w >> 8) & 0xFF00) | ((w << 8) & 0xFF0000) | (w << 24);
+}
+
+TEST_CASE("jump_table_bound_reads_words_in_rom_byte_order") {
+    using N64Recomp::find_jump_table_bound;
+    const uint32_t v0 = 2;
+    const uint32_t words[] = {
+        rom_order(0x2C62000Bu),  // sltiu $v0, $v1, 11
+        rom_order(0x10400010u),  // beqz $v0
+        rom_order(0x00031080u),  // sll $v0, $v1, 2
+        rom_order(0x3C018013u),  // lui $at, 0x8013
+        rom_order(0x00220821u),  // addu $at, $at, $v0
+    };
+    auto found = find_jump_table_bound(words, 5, 4, v0);
+    CHECK(found.has_value());
+    CHECK(found.value_or(0) == 11);
+}
+
+TEST_CASE("jump_table_bound_needs_the_whole_pattern") {
+    using N64Recomp::find_jump_table_bound;
+    const uint32_t v0 = 2;
+    const uint32_t no_guard[] = { rom_order(0x00031080u), rom_order(0x3C018013u), rom_order(0x00220821u) };
+    CHECK(!find_jump_table_bound(no_guard, 3, 2, v0).has_value());
+    const uint32_t index_rewritten[] = {
+        rom_order(0x2C62000Bu),  // sltiu $v0, $v1, 11
+        rom_order(0x24630001u),  // addiu $v1, $v1, 1: not the index the guard checked
+        rom_order(0x00031080u), rom_order(0x3C018013u), rom_order(0x00220821u),
+    };
+    CHECK(!find_jump_table_bound(index_rewritten, 5, 4, v0).has_value());
+    CHECK(!find_jump_table_bound(no_guard, 3, 3, v0).has_value());   // addu index past the function
+}
+
 TEST_CASE("runs_off_end_counts_a_one_word_function") {
     using N64Recomp::function_runs_off_end;
     const uint32_t slti = 0x2A220004, nop = 0, j = 0x08000000, jr_ra = 0x03E00008, b = 0x10000002, eret = 0x42000018;
