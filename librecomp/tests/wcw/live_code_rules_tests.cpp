@@ -186,6 +186,45 @@ TEST_CASE("live codes: a jump into RAM outside known code is caught") {
     CHECK(!hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
 }
 
+TEST_CASE("live codes: a jump into what the table writes is the pack's code, once it's there") {
+    // 32 bytes of RAM: the watched word at 0x80000004, the pack's code at 0x80000010.
+    std::vector<uint8_t> rdram(32);
+    std::vector<uint8_t> rom(32);
+    const auto set = [&](uint32_t index, uint32_t value) { std::memcpy(rdram.data() + index * 4, &value, 4); };
+    Watch w{};
+    w.func = FunctionSpan{ 0x80000000u, 0, 16, 0 };
+    w.words = { 0x80000004u };
+    const std::vector<CodeRange> code = { { 0x80000000u, 0x80000010u } };
+    const std::vector<CodeRange> pack = { { 0x80000010u, 0x80000018u } };
+
+    set(1, 0x08000004u);                   // j 0x80000010
+    CHECK(hooks_outside_code(w, rdram.data(), 32, rom, code));          // no table: refused
+    CHECK(hooks_outside_code(w, rdram.data(), 32, rom, code, pack));    // nothing there yet
+    set(4, 0x3C011234u);
+    CHECK(!hooks_outside_code(w, rdram.data(), 32, rom, code, pack));   // written: followed
+    CHECK(check_exits(w, rdram.data(), 32, rom, code, code, pack) == ExitCheck::Fine);
+    set(4, 0);
+    CHECK(check_exits(w, rdram.data(), 32, rom, code, code, pack) == ExitCheck::NotNow); // may be written later
+    CHECK(check_exits(w, rdram.data(), 32, rom, code, code) == ExitCheck::Never);
+
+    set(4, 0x3C011234u);
+    set(1, 0x08000007u);                   // j 0x8000001C: a target the table doesn't write, the old-revision case
+    CHECK(hooks_outside_code(w, rdram.data(), 32, rom, code, pack));
+    CHECK(check_exits(w, rdram.data(), 32, rom, code, code, pack) == ExitCheck::Never);
+    set(1, 0x03E00008u + (1u << 21));      // jr at: still refused, the table says nothing about where that goes
+    CHECK(hooks_outside_code(w, rdram.data(), 32, rom, code, pack));
+}
+
+TEST_CASE("live codes: written words become ranges") {
+    const std::vector<CodeRange> r = ranges_of_words({ 0x80000108u, 0x80000100u, 0x80000104u, 0x80000104u, 0x80000200u });
+    REQUIRE(r.size() == 2);
+    CHECK(r[0].start == 0x80000100u);
+    CHECK(r[0].end == 0x8000010Cu);
+    CHECK(r[1].start == 0x80000200u);
+    CHECK(r[1].end == 0x80000204u);
+    CHECK(ranges_of_words({}).empty());
+}
+
 TEST_CASE("live codes: a hook written in two halves is judged by the word it makes") {
     Memory m;
     const Watch w = watch_word1();

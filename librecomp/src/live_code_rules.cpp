@@ -103,7 +103,24 @@ namespace recomp::mods::live_codes {
         return false;
     }
 
-    bool hooks_outside_code(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom, std::span<const CodeRange> code) {
+    std::vector<CodeRange> ranges_of_words(const std::vector<uint32_t> &words) {
+        std::vector<uint32_t> sorted = words;
+        std::sort(sorted.begin(), sorted.end());
+        std::vector<CodeRange> ranges;
+        for (uint32_t word : sorted) {
+            if (!ranges.empty() && (word <= ranges.back().end)) {
+                ranges.back().end = std::max(ranges.back().end, word + 4);
+            }
+            else {
+                ranges.push_back(CodeRange{ word, word + 4 });
+            }
+        }
+
+        return ranges;
+    }
+
+    bool hooks_outside_code(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom, std::span<const CodeRange> code,
+        std::span<const CodeRange> pack_writes) {
         for (uint32_t addr : watch.words) {
             uint32_t w, rom_word;
             if (!read_rdram_word(rdram, rdram_size, addr, w) || !read_rom_word(rom, watch.func.rom + (addr - watch.func.vram), rom_word)) {
@@ -113,7 +130,11 @@ namespace recomp::mods::live_codes {
             if (w == rom_word) continue;
             const uint32_t op = w >> 26, rs = (w >> 21) & 31, rt = (w >> 16) & 31, funct = w & 0x3F;
             if ((op == 2) || (op == 3)) {
-                if (!in_code_ranges(((addr + 4) & 0xF0000000u) | ((w & 0x03FFFFFFu) << 2), code)) return true;
+                const uint32_t target = ((addr + 4) & 0xF0000000u) | ((w & 0x03FFFFFFu) << 2);
+                if (!in_code_ranges(target, code)) {
+                    uint32_t there = 0;
+                    if (!in_code_ranges(target, pack_writes) || !read_rdram_word(rdram, rdram_size, target, there) || (there == 0)) return true;
+                }
             }
             else if ((op == 0) && ((funct == 0x08) || (funct == 0x09))) {
                 if (rs != 31) return true;
@@ -128,10 +149,12 @@ namespace recomp::mods::live_codes {
     }
 
     ExitCheck check_exits(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom,
-        std::span<const CodeRange> all, std::span<const CodeRange> loaded)
+        std::span<const CodeRange> all, std::span<const CodeRange> loaded, std::span<const CodeRange> pack_writes)
     {
-        if (hooks_outside_code(watch, rdram, rdram_size, rom, all)) return ExitCheck::Never;
-        return hooks_outside_code(watch, rdram, rdram_size, rom, loaded) ? ExitCheck::NotNow : ExitCheck::Fine;
+        std::vector<CodeRange> known(all.begin(), all.end());
+        known.insert(known.end(), pack_writes.begin(), pack_writes.end());
+        if (hooks_outside_code(watch, rdram, rdram_size, rom, known)) return ExitCheck::Never;
+        return hooks_outside_code(watch, rdram, rdram_size, rom, loaded, pack_writes) ? ExitCheck::NotNow : ExitCheck::Fine;
     }
 
     uint64_t content_key(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size) {

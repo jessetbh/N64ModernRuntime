@@ -2531,6 +2531,7 @@ namespace {
 
     std::vector<LiveFunction> live_functions{};
     std::vector<live_codes::CodeRange> live_code_ranges{};
+    std::vector<live_codes::CodeRange> live_pack_writes{}; // what the table can write: a hook may jump there
     LiveStats live_stats{};
     bool live_switch_log = false;
 
@@ -2630,10 +2631,12 @@ namespace {
     }
 
     // A version's lookup of an address with no function: a version can re-enter a function in the middle, so code in a
-    // loaded section is compiled. Anywhere else stays the fatal "Failed to find function": RDRAM there isn't code, and
-    // compiling it would chain from one stretch of RAM to the next without ever yielding.
+    // loaded section is compiled, and so is code the table writes, where a hook goes (aki-roadmap#205). Anywhere else stays
+    // the fatal "Failed to find function": RDRAM there isn't code, and compiling it would chain from one stretch of RAM to
+    // the next without ever yielding.
     recomp_func_t* live_missing_function(int32_t addr) {
-        return live_codes::in_code_ranges(static_cast<uint32_t>(addr), live_loaded_code()) ? compile_ram_function(addr) : nullptr;
+        const uint32_t a = static_cast<uint32_t>(addr);
+        return (live_codes::in_code_ranges(a, live_loaded_code()) || live_codes::in_code_ranges(a, live_pack_writes)) ? compile_ram_function(addr) : nullptr;
     }
 
     bool live_setup(const std::vector<recomp::mods::conversion::codes::Code>& codes) {
@@ -2644,6 +2647,10 @@ namespace {
         }
         live_switch_log = getenv("WCW_LIVE_CODES_LOG") != nullptr;
         const std::vector<uint32_t> words = live_codes::written_words(codes);
+        const char* hooks_env = getenv("WCW_LIVE_HOOKS");
+        if (hooks_env == nullptr || strcmp(hooks_env, "0") != 0) {
+            live_pack_writes = live_codes::ranges_of_words(words);
+        }
 
         std::vector<live_codes::FunctionSpan> spans{};
         std::vector<std::pair<uint16_t, recomp_func_t*>> owners{};
@@ -2746,11 +2753,11 @@ void recomp::mods::live_codes::after_apply(const std::vector<conversion::codes::
             }
         }
         else {
-            const ExitCheck exits = check_exits(f.watch, rdram, rdram_size, rom, live_code_ranges, live_loaded_code());
+            const ExitCheck exits = check_exits(f.watch, rdram, rdram_size, rom, live_code_ranges, live_loaded_code(), live_pack_writes);
             if (exits == ExitCheck::Never) {
                 f.state.failed.insert(key);
                 live_stats.hooks++;
-                fprintf(stderr, "[live codes] 0x%08X: hooks into RAM outside known code; not compiled\n", vram);
+                fprintf(stderr, "[live codes] 0x%08X: hooks into RAM the table doesn't write; not compiled\n", vram);
                 continue;
             }
             if (exits == ExitCheck::NotNow) {

@@ -54,12 +54,17 @@ namespace recomp::mods::live_codes {
 
     bool in_code_ranges(uint32_t addr, std::span<const CodeRange> code);
 
+    // The words a codes table can write as ranges, for checking a hook's target. Unsorted, repeats are fine.
+    std::vector<CodeRange> ranges_of_words(const std::vector<uint32_t> &words);
+
     // Does a watched word now leave the function in a way the ROM's word didn't: a j or jal outside these ranges, a
     // branch outside the function, or a jr or jalr through a register other than ra? Such a word hooks into code the
-    // pack puts in RAM. A pack's hook can go live before that code is there, and following it crashes (Legends' Extra
-    // Attires, Body Shapes and Ring Ropes, also left out by aki-conv bake-codes), so the version isn't used. A jr built
-    // from lui/ori is caught by its jr only if the pack writes the jr.
-    bool hooks_outside_code(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom, std::span<const CodeRange> code);
+    // pack puts in RAM. A j or jal into `pack_writes` (what the table can write) is that code, as long as something is
+    // there: a hook can go live before its code does. Anywhere else nothing says it's code, and a hook with old-revision
+    // addresses lands there (aki-roadmap#205), so the version isn't used. A jr built from lui/ori is caught by its jr only
+    // if the pack writes the jr.
+    bool hooks_outside_code(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom, std::span<const CodeRange> code,
+        std::span<const CodeRange> pack_writes = {});
 
     // What to do about a version's exits, given every section's code (all) and what's in memory now (loaded).
     enum class ExitCheck {
@@ -68,8 +73,9 @@ namespace recomp::mods::live_codes {
         Never,    // it jumps outside all known code: this content can't run
     };
 
+    // A jump into pack_writes with nothing there yet is NotNow: the table may write it later.
     ExitCheck check_exits(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom,
-        std::span<const CodeRange> all, std::span<const CodeRange> loaded);
+        std::span<const CodeRange> all, std::span<const CodeRange> loaded, std::span<const CodeRange> pack_writes = {});
 
     // A key for the current values of the watched words. Never 0 (0 means "the static function").
     uint64_t content_key(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size);
