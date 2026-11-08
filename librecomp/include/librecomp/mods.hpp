@@ -1,6 +1,7 @@
 #ifndef __RECOMP_MODS_HPP__
 #define __RECOMP_MODS_HPP__
 
+#include <atomic>
 #include <filesystem>
 #include <string>
 #include <fstream>
@@ -343,7 +344,21 @@ namespace recomp {
             void register_game(const std::string& mod_game_id);
             void register_embedded_mod(const std::string& mod_id, std::span<const uint8_t> mod_bytes);
             void register_deprecated_mod(const std::string& mod_id, DeprecationStatus deprecation_status, const Version& maximum_version);
-            std::vector<ModOpenErrorDetails> scan_mod_folder(const std::filesystem::path& mod_folder);
+            // [wcw fullconv] close_first = false adds a folder's mods to the ones already open (a conversion's folder).
+            std::vector<ModOpenErrorDetails> scan_mod_folder(const std::filesystem::path& mod_folder, bool close_first = true);
+            // [wcw fullconv] Ids of the opened mods from index first on (the ones a later scan added).
+            std::vector<std::string> opened_mod_ids_from(size_t first);
+            // [wcw] aki-roadmap#154: the opened mods in [first, last) and what they carry, by their detected content
+            // types: code (a code binary), a ROM patch, or neither (a data pack such as a texture pack).
+            struct OpenedModKind {
+                std::string id;
+                bool code = false;
+                bool rom_patch = false;
+            };
+            std::vector<OpenedModKind> opened_mod_kinds(size_t first, size_t last);
+            // [wcw fullconv] Enables exactly these mods for this session and stops writing mods.json until the next scan,
+            // so a conversion's session never changes the player's normal mod setup.
+            void apply_session_enabled_mods(const std::unordered_set<std::string>& session_mods);
             void close_mods();
             void load_mods_config();
             void enable_mod(const std::string& mod_id, bool enabled, bool trigger_save);
@@ -407,6 +422,12 @@ namespace recomp {
                 std::span<const uint8_t> unpatched_rom,
                 std::span<const uint8_t> patched_rom,
                 const std::unordered_map<recomp_func_t*, overlays::BasePatchedFunction>& base_patched_funcs);
+            // [wcw fullconv] Loads a de-relinked hack's relink.json (see mods.cpp).
+            std::vector<ModLoadErrorDetails> load_relink(
+                const std::string& mod_id,
+                std::span<const char> relink_json,
+                std::span<const uint8_t> patched_rom,
+                uint8_t* rdram);
             void dirty_mod_configuration_thread_process();
             void rebuild_mod_order_lookup();
 
@@ -426,6 +447,8 @@ namespace recomp {
             std::unordered_set<std::string> mod_ids;
             std::unordered_set<std::string> enabled_mods;
             std::unordered_set<std::string> auto_enabled_mods;
+            // [wcw fullconv] A conversion session: mods.json isn't written.
+            std::atomic<bool> session_only_config = false;
             std::unordered_map<std::string, DeprecatedMod> deprecated_mods;
             std::unordered_map<recomp_func_t*, PatchData> patched_funcs;
             std::unordered_map<std::string, size_t> loaded_mods_by_id;
@@ -441,6 +464,8 @@ namespace recomp {
             std::unique_ptr<LiveRecompilerCodeHandle> base_patched_code_handle;
             // [wcw romhack] Code handle for functions recompiled from a ROM patch mod's changed code.
             std::unique_ptr<LiveRecompilerCodeHandle> rom_patch_code_handle;
+            // [wcw fullconv] Code handles for a de-relinked hack's extra functions (relink.json).
+            std::vector<std::unique_ptr<LiveRecompilerCodeHandle>> relink_code_handles;
             // Map of hook definition to the entry hook slot's index.
             std::unordered_map<HookDefinition, size_t> hook_slots;
             // Tracks which hook slots have already been processed. Used to regenerate vanilla functions as needed
@@ -650,7 +675,24 @@ namespace recomp {
         // Refuse: don't load the mod (FailedToLoadPatch). Call before the mods are loaded; later calls replace the list.
         enum class RepairedFunctionPolicy { Warn, Refuse };
         void register_repaired_functions(std::span<recomp_func_t* const> funcs, RepairedFunctionPolicy policy);
+        // [wcw fullconv] Entry prologues (aki-roadmap#76, librecomp/entry_prologue_rules.hpp): code the port hand-added
+        // at the start of a static function, as a function of its own. When the live recompiler replaces that function
+        // (a ROM patch changed it, or a mod hooks it), the replacement calls the prologue at its entry, so the hand-edit
+        // isn't lost. A prologue observes only: the registers are restored after it. Call before the mods are loaded;
+        // later calls replace the list.
+        struct EntryPrologue {
+            recomp_func_t* func;
+            recomp_func_t* prologue;
+        };
+        void register_entry_prologues(std::span<const EntryPrologue> prologues);
         std::vector<ModDetails> get_all_mod_details(const std::string& mod_game_id);
+        // [wcw] aki-roadmap#154: what each opened mod carries (the Mods menu's kind tabs): code, a ROM patch, or
+        // neither (a data pack). Keyed by mod id.
+        struct ModKindInfo {
+            bool code = false;
+            bool rom_patch = false;
+        };
+        std::unordered_map<std::string, ModKindInfo> get_mod_kinds();
         size_t game_mode_count(const std::string& mod_game_id, bool include_disabled);
         recomp::Version get_mod_version(size_t mod_index);
         std::string get_mod_id(size_t mod_index);

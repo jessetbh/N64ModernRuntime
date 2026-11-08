@@ -259,13 +259,14 @@ recomp::patcher::PatcherResult recomp::patcher::patch_rom(std::span<const uint8_
         return PatcherResult::InvalidPatchFile;
     }
 
-    // Checksums are skipped as these patches aren't applied by end users. Any issues with a patch included in a mod would be caught immediately in mod testing.
+    // [wcw fullconv] The source checksum is checked: conversions are applied to the player's own ROM, and a BPS built on
+    // another ROM mostly copies bytes it assumes are there. Applied anyway, it yields garbage code that fails far from
+    // the cause (aki-roadmap#173: WM2000's "V1.2"-based patches on the retail ROM hit a trap at boot). The other checks
+    // stay skipped: with the right source the output is deterministic.
+    if (calculate_crc32(rom) != good_source_checksum) {
+        return PatcherResult::WrongRom;
+    }
 
-    // uint32_t source_checksum = calculate_crc32(rom);
-    // if (source_checksum != good_source_checksum) {
-    //     return PatcherResult::WrongRom;
-    // }
-    
     // uint32_t target_checksum = calculate_crc32(std::span{ ret });
     // if (target_checksum != good_target_checksum) {
     //     return PatcherResult::InvalidPatchFile;

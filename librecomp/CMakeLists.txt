@@ -36,6 +36,20 @@ add_library(librecomp STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/save_backup_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/mod_folder_rules.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/mod_enable_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/entry_prologue_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/regen_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/live_code_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/stall_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/stall_watchdog.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion_codes.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/conversion_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/bundled_packs.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/bundled_packs_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/packages.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/packages_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/packages_install.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/packages_migrate.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/save_backups.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/si.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/sp.cpp"
@@ -78,7 +92,7 @@ if (WIN32)
 endif()
 
 # [wcw] Unit tests for librecomp's own decision logic (tests/wcw: quitting during startup, jessetbh/aki-roadmap#73;
-# save backup rules, aki-roadmap#50; ultramodern's idle external-message wait, aki-roadmap#90; texture pack folders, aki-roadmap#48; dependency auto-enable and folder mod ids, aki-roadmap#100). Plain C++ (no game, no ROM), built and run as part of every librecomp build, so a
+# save backup rules, aki-roadmap#50; ultramodern's idle external-message wait, aki-roadmap#90; texture pack folders, aki-roadmap#48; dependency auto-enable and folder mod ids, aki-roadmap#100; entry prologues and regenerated spans, aki-roadmap#76; packages and their registry, aki-roadmap#154). Plain C++ (no game, no ROM), built and run as part of every librecomp build, so a
 # failing test fails the game's build (as rt64's and recompui's wcw tests do). LIBRECOMP_WCW_TESTS=OFF skips them.
 option(LIBRECOMP_WCW_TESTS "Build and run the wcw unit tests with librecomp" ON)
 if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
@@ -93,9 +107,33 @@ if (LIBRECOMP_WCW_TESTS AND NOT CMAKE_CROSSCOMPILING)
         "${PROJECT_SOURCE_DIR}/src/save_backup_rules.cpp"
         "${PROJECT_SOURCE_DIR}/src/mod_folder_rules.cpp"
         "${PROJECT_SOURCE_DIR}/src/mod_enable_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/conversion_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/conversion_codes.cpp"
+        "${PROJECT_SOURCE_DIR}/src/conversion_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/bundled_packs_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/bundled_packs_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/src/bundled_packs.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/packages_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/packages_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/src/packages.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/packages_install_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/packages_install.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/packages_migrate_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/packages_migrate.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/entry_prologue_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/entry_prologue_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/patcher_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/patcher.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/regen_rules_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/regen_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/stall_rules_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/stall_rules.cpp"
+        "${PROJECT_SOURCE_DIR}/tests/wcw/live_code_rules_tests.cpp"
+        "${PROJECT_SOURCE_DIR}/src/live_code_rules.cpp"
     )
-    target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/tests/wcw"
-        "${PROJECT_SOURCE_DIR}/../ultramodern/include" "${PROJECT_SOURCE_DIR}/../thirdparty/concurrentqueue")
+    target_include_directories(librecomp_wcw_tests PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/include/librecomp" "${PROJECT_SOURCE_DIR}/../N64Recomp/include" "${PROJECT_SOURCE_DIR}/tests/wcw"
+        "${PROJECT_SOURCE_DIR}/../ultramodern/include" "${PROJECT_SOURCE_DIR}/../thirdparty/concurrentqueue" "${PROJECT_SOURCE_DIR}/../thirdparty")
+    target_link_libraries(librecomp_wcw_tests PRIVATE miniz)
     set(LIBRECOMP_WCW_TESTS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/librecomp_wcw_tests.passed")
     add_custom_command(
         OUTPUT "${LIBRECOMP_WCW_TESTS_STAMP}"
