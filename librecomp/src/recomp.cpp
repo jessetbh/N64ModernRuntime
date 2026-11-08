@@ -16,6 +16,7 @@
 #include <charconv>
 
 #include "recomp.h"
+#include "librecomp/stall_rules.hpp"
 #include "librecomp/dd_breadcrumb.hpp"
 #include "librecomp/overlays.hpp"
 #include "librecomp/game.hpp"
@@ -24,6 +25,8 @@
 #include "ultramodern/error_handling.hpp"
 #include "librecomp/addresses.hpp"
 #include "librecomp/mods.hpp"
+#include "librecomp/conversion.hpp"
+#include "librecomp/packages.hpp"
 #include "librecomp/save_backups.hpp"
 #include "librecomp/startup_shutdown.hpp"
 #include "recompiler/live_recompiler.h"
@@ -72,7 +75,23 @@ std::filesystem::path recomp::save_backups::main_save_file() {
         return {};
     }
 
-    return config_path / u8"saves" / (game_roms.begin()->first + u8".bin");
+    // [wcw fullconv] In the save subfolder (a conversion's or a ROM-patch mod's), like the running game's.
+    const std::u8string subfolder = recomp::get_save_subfolder();
+    const std::filesystem::path folder = subfolder.empty() ? (config_path / u8"saves") : (config_path / u8"saves" / subfolder);
+    return folder / (game_roms.begin()->first + u8".bin");
+}
+
+std::u8string recomp::get_save_subfolder() {
+    std::string out;
+    const std::u8string patch = recomp::mods::get_rom_patch_save_subfolder();
+    // [wcw fullconv] The session's conversion (the launcher's AKI_CONVERSION or the Mods-menu choice, aki-roadmap#57).
+    const std::string conversion_id = recomp::mods::session_conversion_id();
+    if (!recomp::mods::conversion::resolve_save_subfolder(conversion_id.empty() ? nullptr : conversion_id.c_str(),
+        std::string{ reinterpret_cast<const char*>(patch.data()), patch.size() }, out)) {
+        return u8"_invalid_conversion";
+    }
+
+    return std::u8string{ reinterpret_cast<const char8_t*>(out.data()), out.size() };
 }
 // The project's version.
 recomp::Version project_version;
@@ -126,17 +145,123 @@ void recomp::mods::register_deprecated_mod(const std::string& mod_id, recomp::mo
     mod_context->register_deprecated_mod(mod_id, deprecation_status, maximum_version);
 }
 
+namespace recomp::mods {
+    std::vector<std::filesystem::path> load_active_conversion(const std::filesystem::path &config_path);
+    bool active_conversion_codes_runnable();
+    std::string active_conversion_cheats_mod();
+}
+
+// [wcw] The file names a game installs into mods/ from assets/mods next to its executable (install_bundled_mods).
+// Migration doesn't record them (aki-roadmap#154): the game rewrites them on update.
+static std::vector<std::string> bundled_mod_names() {
+    std::vector<std::string> names;
+    std::filesystem::path exe;
+#ifdef _WIN32
+    wchar_t buf[32768];
+    const DWORD n = GetModuleFileNameW(nullptr, buf, DWORD(std::size(buf)));
+    if (n > 0 && n < std::size(buf)) {
+        exe = std::filesystem::path(std::wstring(buf, n));
+    }
+#else
+    std::error_code exe_ec;
+    exe = std::filesystem::read_symlink("/proc/self/exe", exe_ec);
+#endif
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(exe.parent_path() / "assets" / "mods", ec), end; !exe.empty() && !ec && it != end; it.increment(ec)) {
+        const std::u8string name = it->path().filename().u8string();
+        names.emplace_back(name.begin(), name.end());
+    }
+    return names;
+}
+
 void recomp::mods::scan_mods() {
+    // [wcw] aki-roadmap#154: finish or undo an install a crash interrupted, then install the packages dropped in
+    // <data>/import, before the mod folder is scanned so they load in this session. Once per run: the Mods menu
+    // scans again mid-session, when files the first scan opened could block a swap. Only a port with one game knows
+    // which game a package must be for.
+    static bool packages_imported = false;
+    if (!packages_imported && game_roms.size() == 1) {
+        packages_imported = true;
+        if (const std::string recovered = recomp::packages::recover_interrupted_install(config_path); !recovered.empty()) {
+            printf("[wcw] packages: %s\n", recovered.c_str());
+        }
+        std::error_code ec;
+        const recomp::GameEntry &game = game_roms.begin()->second;
+        const bool migrate = !recomp::packages::migration_done(config_path) && !(std::getenv("AKI_MIGRATE") && std::string(std::getenv("AKI_MIGRATE")) == "0");
+        const bool do_import = std::filesystem::is_directory(config_path / recomp::packages::ImportFolder, ec);
+        const std::string rom_sha1 = (migrate || do_import) ?
+            recomp::packages::sha1_file(config_path / game.stored_filename()).value_or(std::string()) : std::string();
+        if (migrate) {
+            // The first start with the registry: patch-mod hacks become conversions, installed files get recorded
+            // (aki-roadmap#154 step 3; migration.log says what moved). AKI_MIGRATE=0 skips it for one start.
+            recomp::packages::MigrateOptions migrate_options;
+            migrate_options.game_id = game.mod_game_id;
+            migrate_options.rom_sha1 = rom_sha1;
+            migrate_options.bundled_names = bundled_mod_names();
+            for (const std::string &line : recomp::packages::migrate(config_path, migrate_options).lines) {
+                printf("[wcw] packages: %s\n", line.c_str());
+            }
+        }
+        if (do_import) {
+            recomp::packages::InstallOptions options;
+            options.game_id = game.mod_game_id;
+            options.rom_sha1 = rom_sha1;
+            const recomp::Version &version = recomp::get_project_version();
+            if (version.major >= 0) {
+                options.recomp_version = std::to_string(version.major) + "." + std::to_string(version.minor) + "." + std::to_string(version.patch);
+            }
+            recomp::packages::process_import_folder(config_path, options);
+        }
+    }
     std::vector<recomp::mods::ModOpenErrorDetails> mod_open_errors;
+    // [wcw fullconv] AKI_CONVERSION=<id>: also open the conversion's own mods (its patch, its texture pack).
+    const std::vector<std::filesystem::path> conversion_folders = load_active_conversion(config_path);
+    std::vector<std::string> conversion_mod_ids;
+    std::vector<ModContext::OpenedModKind> stock_mods;
     {
         std::lock_guard mod_lock{ mod_context_mutex };
         mod_open_errors = mod_context->scan_mod_folder(config_path / mods_directory);
+        const size_t stock_mod_count = mod_context->num_opened_mods();
+        stock_mods = mod_context->opened_mod_kinds(0, stock_mod_count);
+        for (const std::filesystem::path &folder : conversion_folders) {
+            for (auto &error : mod_context->scan_mod_folder(folder, false)) {
+                mod_open_errors.emplace_back(std::move(error));
+            }
+        }
+        conversion_mod_ids = mod_context->opened_mod_ids_from(stock_mod_count);
     }
     for (const auto& cur_error : mod_open_errors) {
         printf("Error opening mod " PATHFMT ": %s (%s)\n", cur_error.mod_path.c_str(), recomp::mods::error_to_string(cur_error.error).c_str(), cur_error.error_param.c_str());
     }
 
     mod_context->load_mods_config();
+    if (!conversion_folders.empty()) {
+        // The conversion's mods (and the cheats engine for its codes) run, plus the player's add-ons it allows: data
+        // packs by default, code add-ons it lists, and whatever the player turned on or off for this conversion
+        // (conversions/<id>/addons.json; aki-roadmap#154). Nothing is saved to mods.json.
+        const conversion::Conversion *active = active_conversion();
+        std::vector<conversion::PlayerMod> player_mods;
+        for (const ModContext::OpenedModKind &m : stock_mods) {
+            player_mods.push_back({ m.id, m.code, m.rom_patch, mod_context->is_mod_enabled(m.id) });
+        }
+        conversion::PlayerAddons player;
+        conversion::Conversion fallback;
+        if (active) {
+            std::ifstream addons_file(config_path / conversion::Folder / std::filesystem::path(std::u8string(active->id.begin(), active->id.end())) / conversion::AddonsFile, std::ios::binary);
+            if (addons_file) {
+                player = conversion::parse_player_addons(std::string(std::istreambuf_iterator<char>(addons_file), std::istreambuf_iterator<char>()));
+            }
+        }
+        std::vector<std::string> why;
+        mod_context->apply_session_enabled_mods(conversion::session_enabled_mods(conversion_mod_ids,
+            active_conversion_codes_runnable(), active_conversion_cheats_mod(), player_mods, active ? *active : fallback, player, &why));
+        for (const std::string &line : why) {
+            fprintf(stderr, "[conversion] %s\n", line.c_str());
+        }
+        for (const std::string &id : conversion_mod_ids) {
+            fprintf(stderr, "[conversion] mod %s enabled for this session\n", id.c_str());
+        }
+    }
 }
 
 void recomp::mods::close_mods() {
@@ -716,6 +841,30 @@ std::vector<recomp::mods::ModDetails> recomp::mods::get_all_mod_details(const st
     return mod_context->get_all_mod_details(mod_game_id);
 }
 
+std::unordered_map<std::string, recomp::mods::ModKindInfo> recomp::mods::get_mod_kinds() {
+    std::lock_guard lock { mod_context_mutex };
+    std::unordered_map<std::string, ModKindInfo> out;
+    for (const ModContext::OpenedModKind &m : mod_context->opened_mod_kinds(0, mod_context->num_opened_mods())) {
+        out[m.id] = { m.code, m.rom_patch };
+    }
+    return out;
+}
+
+recomp::packages::InstallResult recomp::packages::install_package(const std::filesystem::path &package) {
+    recomp::packages::InstallOptions options;
+    if (game_roms.size() == 1) {
+        const recomp::GameEntry &game = game_roms.begin()->second;
+        options.game_id = game.mod_game_id;
+        options.rom_sha1 = sha1_file(config_path / game.stored_filename()).value_or(std::string());
+    }
+    const recomp::Version &version = recomp::get_project_version();
+    if (version.major >= 0) {
+        options.recomp_version = std::to_string(version.major) + "." + std::to_string(version.minor) + "." + std::to_string(version.patch);
+    }
+    options.source = "launcher";   // installed from inside the game: the same rules as the launcher's
+    return install(package, config_path, options);
+}
+
 size_t recomp::mods::game_mode_count(const std::string& mod_game_id, bool include_disabled) {
     std::lock_guard lock { mod_context_mutex };
     return mod_context->game_mode_count(mod_game_id, include_disabled);
@@ -734,6 +883,45 @@ std::string recomp::mods::get_mod_id(size_t mod_index) {
 void recomp::mods::set_mod_index(const std::string &mod_game_id, const std::string &mod_id, size_t index) {
     std::lock_guard lock{ mod_context_mutex };
     return mod_context->set_mod_index(mod_game_id, mod_id, index);
+}
+
+// [wcw fullconv] With a de-relinked hack active, the low user segment (0x00000000-0x007FFFFF, rdram + 0x80000000 in
+// the reservation) reads as zero pages instead of faulting: hack code tested on lenient emulators reads through
+// pointers that aren't set up yet on the port's first frames (Revenge Starrcade 2.0's per-frame hook walks an audio
+// table before the main thread relocates its offsets). Stock games keep faulting there.
+extern "C" void wcw_commit_low_user_segment(uint8_t* rdram) {
+#ifdef _WIN32
+    if (VirtualAlloc(rdram + 0x80000000ull, 0x800000, MEM_COMMIT, PAGE_READWRITE) == nullptr) {
+        fprintf(stderr, "[relink] could not map the low user segment\n");
+    }
+#else
+    mprotect(rdram + 0x80000000ull, 0x800000, PROT_READ | PROT_WRITE);
+#endif
+}
+
+// [wcw fullconv] A de-relinked hack that reads the cartridge directly (lw from 0xB0000000 + offset; relink.json
+// direct_rom_reads): the patched ROM is mapped read-only at that address of the reservation, in RDRAM's word order
+// (Revenge Starrcade 2.0 copies a block from ROM 0x2300000 at run time).
+extern "C" void wcw_map_rom_k1(uint8_t* rdram) {
+    std::span<const uint8_t> rom = recomp::get_rom();
+    const size_t size = (rom.size() + 0xFFFF) & ~size_t(0xFFFF);
+    if (size == 0 || size > 0x10000000) {
+        return;
+    }
+    uint8_t* dst = rdram + 0x30000000ull;
+#ifdef _WIN32
+    if (VirtualAlloc(dst, size, MEM_COMMIT, PAGE_READWRITE) == nullptr) {
+        fprintf(stderr, "[relink] could not map the ROM for direct reads\n");
+        return;
+    }
+#else
+    mprotect(dst, size, PROT_READ | PROT_WRITE);
+#endif
+    for (size_t i = 0; i + 4 <= rom.size(); i += 4) {
+        const uint32_t w = (uint32_t(rom[i]) << 24) | (uint32_t(rom[i + 1]) << 16) | (uint32_t(rom[i + 2]) << 8) | rom[i + 3];
+        memcpy(dst + i, &w, 4);
+    }
+    fprintf(stderr, "[relink] ROM mapped for direct reads (0x%zX bytes)\n", rom.size());
 }
 
 bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
@@ -930,6 +1118,7 @@ void recomp::start(
 
         ultramodern::preinit(rdram, window_handle);
         preinit_done.store(true);
+        recomp::stall::start_watchdog(rdram); // [wcw] WCW_STALL_DUMP
 
         recomp_context context{};
 

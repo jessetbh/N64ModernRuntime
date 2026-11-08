@@ -5,6 +5,7 @@
 #include <string>
 #include <mutex>
 #include "recomp.h"
+#include "librecomp/conversion.hpp"
 #include "librecomp/addresses.hpp"
 #include "librecomp/game.hpp"
 #include "librecomp/files.hpp"
@@ -279,8 +280,8 @@ void read_save_file() {
 }
 
 void ultramodern::init_saving(RDRAM_ARG1) {
-    // [wcw romhack] A ROM-patch mod's saves live in saves/<mod id>/.
-    set_save_file_path(recomp::mods::get_rom_patch_save_subfolder(), recomp::current_game_id());
+    // [wcw romhack] A ROM-patch mod's saves live in saves/<mod id>/; [wcw fullconv] a conversion's in saves/<conversion id>/.
+    set_save_file_path(recomp::get_save_subfolder(), recomp::current_game_id());
 
     // [wcw saves] Apply a restore picked in the menu, then back up the save files before the game reads them
     // (aki-roadmap#50).
