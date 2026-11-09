@@ -395,7 +395,11 @@ namespace wcw_texnames {
             const uint32_t bytesOffset = uint32_t(load.uls >> 2) << load.textureSiz >> 1;
             const uint32_t bytesPerRow = uint32_t(load.textureWidth) << load.textureSiz >> 1;
             if (load.type == LoadType::Tile) {
-                int tileWidth = (std::max((load.lrs >> 2) - (load.uls >> 2), 0) + 1) & 0x03FF;
+                // Rice's width is ((lrs - uls) >> 2) + 1, not (lrs >> 2) - (uls >> 2) + 1: they differ by one when the load
+                // starts on a half texel (aki-roadmap#204: No Mercy's string textures load 64-px chunks from uls 31.5, and
+                // Legends' blanking art for the Rumble Pak text is named by the 33-wide key). The height keeps the per-edge
+                // rounding: no pack has shown a half-texel ult yet.
+                int tileWidth = (std::max((load.lrs - load.uls) >> 2, 0) + 1) & 0x03FF;
                 const int tileHeight = (std::max((load.lrt >> 2) - (load.ult >> 2), 0) + 1) & 0x03FF;
                 if (load.masks != 0) {
                     tileWidth = std::min(tileWidth, 1 << load.masks);
