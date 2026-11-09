@@ -324,7 +324,7 @@ namespace recomp::mods::conversion {
         char address[16];
         snprintf(address, sizeof(address), "0x%08X", uint32_t(hit));
         return std::string("its patch uses Expansion RAM (from ") + address + "), where model packs load; custom models "
-            "in relinked conversions need aki-roadmap#156 (after 0.3.0)";
+            "in relinked conversions aren't supported yet";
     }
 
     std::unordered_set<std::string> session_enabled_mods(const std::vector<std::string> &conversion_mod_ids,

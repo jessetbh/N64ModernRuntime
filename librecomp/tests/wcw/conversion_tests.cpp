@@ -428,7 +428,8 @@ TEST_CASE("conversion: models are refused beside a patch that uses the models wi
         "zero": [{"ram": 2151678080, "size": 130900}]})json";
     const std::string why = models_refusal(btbw);
     CHECK(!why.empty());
-    CHECK(why.find("#156") != std::string::npos);
+    CHECK(why.find("aren't supported yet") != std::string::npos);
+    CHECK(why.find('#') == std::string::npos);  // players see it: no private issue numbers (aki-roadmap#281)
     CHECK(why.find("0x80400FE0") != std::string::npos);  // the first range that overlaps, as the hack wrote it
     // Legends / Showdown 64: code above 8 MB (fine) but a zeroed block at 0x80600000 (inside the window).
     CHECK(!models_refusal(R"json({"code_ranges": [[2399141888, 2399146444]], "zero": [{"ram": 2153775104, "size": 6864}]})json").empty());
