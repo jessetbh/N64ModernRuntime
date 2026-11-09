@@ -8,7 +8,11 @@
 #include "librecomp/conversion.hpp"
 #include "librecomp/conversion_codes.hpp"
 
+#include <chrono>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -517,4 +521,76 @@ TEST_CASE("conversion: a newer model format or a bad slot turns the models off w
 
     // The roster path stays inside the conversion folder.
     CHECK(!parse(with(R"json({ "dir": "models", "roster": "../roster.json" })json"), "", c, error));
+}
+
+TEST_CASE("conversion: seed saves are saves[] entries with mode seed or no mode; their paths stay inside (#242)") {
+    auto with = [](const std::string &saves) {
+        return R"json({ "format": "aki-conversion", "format_version": 1, "id": "s", "game": "nomercy",
+            "components": { "patch": { "file": "patch.nrm" }, "saves": )json" + saves + " } }";
+    };
+    Conversion c;
+    std::string error;
+    CHECK(parse(with(R"json([ { "file": "saves/wwf.nomercy.us.bin", "kind": "flash" },
+        { "file": "saves/pak0.bin", "kind": "pak0", "mode": "seed" }, { "file": "saves/other.bin", "mode": "later" }, "junk", {} ])json"), "", c, error));
+    CHECK(c.has_saves);
+    CHECK(c.seed_saves.size() == 2);
+    CHECK(c.seed_saves[0] == "saves/wwf.nomercy.us.bin");
+    CHECK(c.seed_saves[1] == "saves/pak0.bin");
+
+    CHECK(parse(Full, "nomercy_unlocked", c, error));
+    CHECK(c.seed_saves.size() == 1);
+
+    for (const char *bad : { "../wwf.nomercy.us.bin", "/wwf.nomercy.us.bin", "\\\\wwf.nomercy.us.bin", "C:/wwf.nomercy.us.bin" }) {
+        CHECK(!parse(with(std::string(R"json([ { "file": ")json") + bad + R"json(" } ])json"), "", c, error));
+        CHECK(error.find("leaves the conversion folder") != std::string::npos);
+    }
+}
+
+TEST_CASE("conversion: the RT rig path is set only when the conversion has one and the variable is unset (#241)") {
+    Conversion c;
+    std::string error;
+    CHECK(parse(Full, "nomercy_unlocked", c, error));
+    const std::filesystem::path folder = std::filesystem::u8path("conv/nomercy_unlocked");
+    CHECK(rt_lights_path(c, folder, nullptr) == folder / "rt_lights.json");
+    CHECK(rt_lights_path(c, folder, "") == folder / "rt_lights.json");
+    CHECK(rt_lights_path(c, folder, "C:/launcher/rt_lights.json").empty());   // the launcher's (or a test run's) wins
+
+    Conversion none;
+    CHECK(rt_lights_path(none, folder, nullptr).empty());
+}
+
+TEST_CASE("conversion: seed saves are copied once, never over an existing save; a missing one is logged (#242)") {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / ("wcw_conversion_seed_" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+    const fs::path folder = root / "conversions" / "s";
+    const fs::path saves = root / "saves" / "s";
+    fs::create_directories(folder / "saves");
+    auto write = [](const fs::path &p, const std::string &text) { std::ofstream(p, std::ios::binary) << text; };
+    auto read = [](const fs::path &p) { std::ifstream f(p, std::ios::binary); std::stringstream ss; ss << f.rdbuf(); return ss.str(); };
+    write(folder / "saves" / "wwf.nomercy.us.bin", "seed-flash");
+    write(folder / "saves" / "pak0.bin", "seed-pak");
+
+    Conversion c;
+    c.id = "s";
+    c.seed_saves = { "saves/wwf.nomercy.us.bin", "saves/pak0.bin", "saves/missing.bin" };
+
+    SeedReport r = seed_saves(c, folder, saves);   // creates saves/s/
+    CHECK(r.seeded == 2 && r.kept == 0 && r.failed == 1);
+    CHECK(r.lines.size() == 3);
+    CHECK(read(saves / "wwf.nomercy.us.bin") == "seed-flash");
+    CHECK(read(saves / "pak0.bin") == "seed-pak");
+    CHECK(!fs::exists(saves / "missing.bin"));
+    CHECK(!fs::exists(saves / "wwf.nomercy.us.bin.seed-tmp"));
+
+    // The player's progress stays.
+    write(saves / "wwf.nomercy.us.bin", "player");
+    fs::remove(saves / "pak0.bin");
+    r = seed_saves(c, folder, saves);
+    CHECK(r.seeded == 1 && r.kept == 1 && r.failed == 1);
+    CHECK(read(saves / "wwf.nomercy.us.bin") == "player");
+    CHECK(read(saves / "pak0.bin") == "seed-pak");
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
 }

@@ -55,6 +55,9 @@ namespace recomp {
                 std::string textures_naming;
                 std::string rt_lights_file;
                 std::string rt_materials_file;
+                // saves[] entries the game seeds (aki-roadmap#242): "mode": "seed" or no mode, relative to the conversion
+                // folder, in the port's on-disk format and file name.
+                std::vector<std::string> seed_saves;
                 // aki.json "models" (aki-roadmap#226): the conversion's own model packs, which replace the player's
                 // while it runs. {"dir": "models", "format": 2, "roster": "models/roster.json",
                 //  "slots": [{"wrestler": "0x0404", "name": "Kenny Omega", "costume": 0, "pack": "kenny"}]}
@@ -157,6 +160,20 @@ namespace recomp {
             // Why a lenient (Mods-menu) choice can't run, "" when it can (out is then its parsed aki.json). manifest_text:
             // the text of <config>/conversions/<id>/aki.json, "" when it isn't installed.
             std::string check_choice(const std::string &id, const std::string &manifest_text, Conversion &out);
+
+            // aki-roadmap#241: the WCW_RT_LIGHTS_FILE a session with this conversion sets before rt64 reads its presets
+            // (at the first ray-traced frame): <folder>/<rt.lights>. Empty: leave the variable alone (no rig, or it is
+            // already set, by AKI Launcher or a test run).
+            std::filesystem::path rt_lights_path(const Conversion &c, const std::filesystem::path &folder, const char *env_value);
+
+            // aki-roadmap#242: copies each seed save from the conversion folder into saves_folder (saves/<id>/) under its
+            // file name, only when that file doesn't exist yet: never over the player's progress. The launcher's Install
+            // does the same, so either may run first. A missing seed file is logged and skipped. One line per save.
+            struct SeedReport {
+                int seeded = 0, kept = 0, failed = 0;
+                std::vector<std::string> lines;
+            };
+            SeedReport seed_saves(const Conversion &c, const std::filesystem::path &folder, const std::filesystem::path &saves_folder);
 
             // Whether codes written for codes_rom may run on this port: the same game (the cheats engine translates another
             // revision's addresses itself); "" (unknown) and other games are refused.

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <system_error>
 
 #include "json/json.hpp"
 
@@ -188,6 +189,17 @@ namespace recomp::mods::conversion {
 
         if (const json *saves = object("saves")) {
             c.has_saves = saves->is_array() && !saves->empty();
+            if (saves->is_array()) {
+                for (const json &save : *saves) {
+                    if (!save.is_object()) {
+                        continue;
+                    }
+                    const std::string file = save.value("file", std::string());
+                    if (!file.empty() && (save.value("mode", std::string("seed")) == "seed")) {
+                        c.seed_saves.push_back(file);
+                    }
+                }
+            }
         }
 
         if (const json *textures = object("textures")) {
@@ -228,6 +240,12 @@ namespace recomp::mods::conversion {
             if ((path->find("..") != std::string::npos) || (!path->empty() && ((path->front() == '/') || (path->front() == '\\') ||
                 (path->find(':') != std::string::npos)))) {
                 error = "path leaves the conversion folder: " + *path;
+                return false;
+            }
+        }
+        for (const std::string &path : c.seed_saves) {
+            if ((path.find("..") != std::string::npos) || (path.front() == '/') || (path.front() == '\\') || (path.find(':') != std::string::npos)) {
+                error = "path leaves the conversion folder: " + path;
                 return false;
             }
         }
@@ -449,6 +467,61 @@ namespace recomp::mods::conversion {
 
         out = env_value;
         return true;
+    }
+
+    std::filesystem::path rt_lights_path(const Conversion &c, const std::filesystem::path &folder, const char *env_value) {
+        if (c.rt_lights_file.empty() || ((env_value != nullptr) && (env_value[0] != 0))) {
+            return {};
+        }
+        return folder / std::filesystem::u8path(c.rt_lights_file);
+    }
+
+    SeedReport seed_saves(const Conversion &c, const std::filesystem::path &folder, const std::filesystem::path &saves_folder) {
+        SeedReport r;
+        for (const std::string &file : c.seed_saves) {
+            const std::filesystem::path from = folder / std::filesystem::u8path(file);
+            const std::filesystem::path name = from.filename();
+            std::error_code ec;
+            if (name.empty()) {
+                r.failed++;
+                r.lines.push_back("seed save " + file + " names no file; skipped");
+                continue;
+            }
+
+            const std::u8string name8 = name.u8string();
+            const std::string name_text(reinterpret_cast<const char *>(name8.data()), name8.size());
+            const std::filesystem::path to = saves_folder / name;
+            if (std::filesystem::exists(to, ec)) {
+                r.kept++;
+                r.lines.push_back("save " + file + ": kept the existing saves/" + c.id + "/" + name_text);
+                continue;
+            }
+            if (!std::filesystem::is_regular_file(from, ec)) {
+                r.failed++;
+                r.lines.push_back("seed save " + file + " is missing from the conversion; the game starts without it");
+                continue;
+            }
+
+            // Copied beside it first, so a failed copy never leaves a half save the game would then read.
+            std::filesystem::create_directories(saves_folder, ec);
+            const std::filesystem::path temp = saves_folder / (name8 + u8".seed-tmp");
+            std::filesystem::remove(temp, ec);
+            ec.clear();
+            std::filesystem::copy_file(from, temp, ec);
+            if (!ec) {
+                std::filesystem::rename(temp, to, ec);
+            }
+            if (ec) {
+                std::error_code ignored;
+                std::filesystem::remove(temp, ignored);
+                r.failed++;
+                r.lines.push_back("seed save " + file + " couldn't be copied: " + ec.message());
+                continue;
+            }
+            r.seeded++;
+            r.lines.push_back("seeded saves/" + c.id + "/" + name_text + " from " + file);
+        }
+        return r;
     }
 
     bool codes_runnable(const std::string &codes_rom, const std::string &port_rom) {
