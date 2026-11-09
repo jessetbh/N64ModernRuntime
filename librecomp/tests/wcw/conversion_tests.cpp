@@ -79,6 +79,47 @@ TEST_CASE("conversion: bad manifests are refused with a reason") {
     CHECK(!parse(R"json({ "format": "aki-conversion", "format_version": 1, "id": "a", "components": { "rt": { "lights": "C:\\x.json" } } })json", "", c, error));
 }
 
+TEST_CASE("conversion: a wrongly typed manifest is refused, never thrown (aki-roadmap#243)") {
+    const auto refused = [](const std::string &text, const char *want) {
+        Conversion c;
+        std::string error;
+        bool ok = true;
+        bool threw = false;
+        try {
+            ok = parse(text, "", c, error);
+        }
+        catch (...) {
+            threw = true;
+        }
+        CHECK(!threw);
+        CHECK(!ok);
+        CHECK(error.find(want) != std::string::npos);
+    };
+    const std::string head = R"json({ "format": "aki-conversion", "format_version": 1, "id": "a", )json";
+    // Components written as lists (the authoring mistake that crashed the game).
+    refused(head + R"json("components": { "codes": [{ "file": "c.txt" }] } })json", "components.codes must be an object");
+    refused(head + R"json("components": { "textures": [{ "dir": "t" }] } })json", "components.textures must be an object");
+    refused(head + R"json("components": { "rt": [{ "lights": "l.json" }] } })json", "components.rt must be an object");
+    refused(head + R"json("components": { "patch": [{ "file": "p.nrm" }] } })json", "components.patch must be an object");
+    refused(head + R"json("components": { "models": [], "codes": { "file": "c.txt" } } })json", "components.models must be an object");
+    refused(head + R"json("components": { "codes": "c.txt" } })json", "components.codes must be an object");
+    // Values of the wrong type.
+    refused(R"json({ "format": "aki-conversion", "format_version": 1, "id": 5, "components": { "codes": { "file": "c.txt" } } })json", "wrong type");
+    refused(R"json({ "format": "aki-conversion", "format_version": "1", "id": "a", "components": { "codes": { "file": "c.txt" } } })json", "wrong type");
+    refused(head + R"json("components": { "codes": { "file": 5 } } })json", "wrong type");
+    refused(head + R"json("components": { "codes": { "file": "c.txt", "rom": "x", "rom_revision": 1 } } })json", "wrong type");
+    refused(head + R"json("components": { "textures": { "package": true } } })json", "wrong type");
+    refused(head + R"json("components": { "rt": { "lights": 1 } } })json", "wrong type");
+    refused(head + R"json("components": { "models": { "dir": "m", "slots": [{ "wrestler": "0x0404", "pack": "p", "name": 7 }] } } })json", "wrong type");
+    // saves stays a list, and the valid manifests still parse.
+    Conversion c;
+    std::string error;
+    CHECK(parse(head + R"json("components": { "saves": ["s.sra"] } })json", "", c, error));
+    CHECK(c.has_saves);
+    CHECK(parse(Full, "", c, error));
+    CHECK(c.has_patch && c.has_codes);
+}
+
 TEST_CASE("conversion: ids are safe folder names") {
     CHECK(valid_id("nomercy_unlocked"));
     CHECK(valid_id("nmp-v2.1"));

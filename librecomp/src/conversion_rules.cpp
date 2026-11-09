@@ -127,7 +127,9 @@ namespace recomp::mods::conversion {
         return out;
     }
 
-    bool parse(const std::string &json_text, const std::string &expected_id, Conversion &out, std::string &error) {
+    namespace {
+    // parse() without the type guard: nlohmann's value() throws json::type_error on a value of the wrong type.
+    bool parse_manifest(const std::string &json_text, const std::string &expected_id, Conversion &out, std::string &error) {
         using json = nlohmann::json;
         const json root = json::parse(json_text, nullptr, false);
         if (root.is_discarded() || !root.is_object()) {
@@ -160,13 +162,22 @@ namespace recomp::mods::conversion {
             return false;
         }
 
+        // These components are objects. One written as anything else (a list, a string) is refused, not skipped:
+        // the launcher still lists it, so skipping would run the conversion without it (aki-roadmap#243).
+        for (const char *key : { "patch", "codes", "textures", "rt", "models" }) {
+            const auto it = components->find(key);
+            if ((it != components->end()) && !it->is_object()) {
+                error = std::string("components.") + key + " must be an object";
+                return false;
+            }
+        }
         auto object = [&](const char *key) -> const json * {
             const auto it = components->find(key);
-            return ((it != components->end()) && (it->is_object() || it->is_array())) ? &*it : nullptr;
+            return (it != components->end()) ? &*it : nullptr;
         };
 
         if (const json *patch = object("patch")) {
-            c.has_patch = patch->is_object() && patch->contains("file");
+            c.has_patch = patch->contains("file");
         }
 
         if (const json *codes = object("codes")) {
@@ -228,6 +239,19 @@ namespace recomp::mods::conversion {
 
         out = std::move(c);
         return true;
+    }
+    }
+
+    bool parse(const std::string &json_text, const std::string &expected_id, Conversion &out, std::string &error) {
+        // A wrongly typed value ("id": 5, "codes": { "file": 5 }) refuses the conversion like any other bad
+        // manifest. Uncaught, the exception ended the game in list_installed_conversions() (aki-roadmap#243).
+        try {
+            return parse_manifest(json_text, expected_id, out, error);
+        }
+        catch (const nlohmann::json::exception &e) {
+            error = std::string("aki.json has a value of the wrong type: ") + e.what();
+            return false;
+        }
     }
 
     std::string models_refusal(const std::string &relink_json) {
