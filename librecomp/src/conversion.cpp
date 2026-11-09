@@ -312,7 +312,7 @@ namespace recomp::mods {
             fprintf(stderr, "[conversion] rt lights: %.*s\n", int(text.size()), reinterpret_cast<const char *>(text.data()));
         }
         if (!c.rt_materials_file.empty()) {
-            fprintf(stderr, "[conversion] rt materials %s ignored: per-surface materials aren't supported yet (aki-roadmap#95)\n",
+            fprintf(stderr, "[conversion] rt materials %s ignored: this version doesn't read per-surface materials yet\n",
                 c.rt_materials_file.c_str());
         }
 
