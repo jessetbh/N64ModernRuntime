@@ -21,6 +21,22 @@ namespace recomp {
             pump();
         }
     }
+
+    // [wcw fix] jessetbh/aki-roadmap#252. The end of recomp::start, after the game threads were
+    // asked to park and the host threads (events, timer, saving: the last save is flushed) have
+    // stopped. All parked: free rdram and return to main as before. A game thread still running
+    // (a busy loop that never makes another OS call, e.g. a hung conversion): returning would let
+    // main exit and run the process's static destructors under that thread, which then faults
+    // on freed state (an access violation at a small address after "recomp::start returned").
+    // End the process right here instead, with the exit code of a normal quit.
+    template <typename FreeRdram, typename EndProcess>
+    void finish_shutdown(bool game_threads_parked, FreeRdram&& free_rdram, EndProcess&& end_process) {
+        if (!game_threads_parked) {
+            end_process();
+            return;
+        }
+        free_rdram();
+    }
 }
 
 #endif

@@ -97,6 +97,24 @@ TEST_CASE("quit during startup: pumping stops as soon as startup is done") {
     CHECK_EQ(pumps, 3);
 }
 
+TEST_CASE("shutdown with every game thread parked: rdram is freed and start returns to main") {
+    int frees = 0;
+    int ends = 0;
+    recomp::finish_shutdown(true, [&] { frees++; }, [&] { ends++; });
+    CHECK_EQ(frees, 1);
+    CHECK_EQ(ends, 0);
+}
+
+TEST_CASE("shutdown with a game thread still running: the process ends before main's static destructors (#252)") {
+    // A hung conversion's busy loop never parks; returning to main used to run static destructors under it and it
+    // faulted on freed state after "recomp::start returned".
+    int frees = 0;
+    int ends = 0;
+    recomp::finish_shutdown(false, [&] { frees++; }, [&] { ends++; });
+    CHECK_EQ(ends, 1);
+    CHECK_EQ(frees, 0);   // rdram stays mapped: the running thread may still read it
+}
+
 int main() {
     return WcwTest::runAll("librecomp wcw tests");
 }
