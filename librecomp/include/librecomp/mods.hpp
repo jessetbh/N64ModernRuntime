@@ -356,6 +356,9 @@ namespace recomp {
                 bool rom_patch = false;
             };
             std::vector<OpenedModKind> opened_mod_kinds(size_t first, size_t last);
+            // [wcw fullconv] aki-roadmap#226: a file from inside an opened mod (e.g. a patch's relink.json). False when
+            // no opened mod has this id or the file isn't in it.
+            bool read_opened_mod_file(const std::string& mod_id, const std::string& path, std::vector<char>& out);
             // [wcw fullconv] Enables exactly these mods for this session and stops writing mods.json until the next scan,
             // so a conversion's session never changes the player's normal mod setup.
             void apply_session_enabled_mods(const std::unordered_set<std::string>& session_mods);
