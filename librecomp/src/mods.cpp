@@ -1,4 +1,3 @@
-#include <limits>
 #include <span>
 #include <mutex>
 #include <unordered_set>
@@ -2439,15 +2438,13 @@ static recomp_func_t* compile_ram_function(int32_t addr) {
             while (pc >= a && pc < limit && !seen.contains(pc)) {
                 seen.insert(pc);
                 const uint32_t w = word(pc);
-                const uint32_t op = w >> 26, rt = (w >> 16) & 31;
+                const uint32_t op = w >> 26;
                 // one ends the code (don't trace on into data)
                 if (word_not_game_code(w)) {
                     break;
                 }
                 end = std::max(end, pc + 8);
-                const bool branch = (op >= 4 && op <= 7) || (op >= 0x14 && op <= 0x17) ||
-                    (op == 1 && (rt <= 3 || (rt >= 0x10 && rt <= 0x13)));
-                if (branch) {
+                if (recomp::mods::live_codes::is_branch_word(w)) {
                     const uint32_t t = pc + 4 + (uint32_t)((int32_t)(int16_t)(w & 0xFFFF) << 2);
                     if (!minimal && t >= a && t < limit && !seen.contains(t)) {
                         work.push_back(t);
@@ -2642,15 +2639,23 @@ namespace {
         const uint32_t a = static_cast<uint32_t>(addr);
         if (live_codes::in_code_ranges(a, live_pack_writes)) {
             // The table runs once per game frame, a GameShark once per VI. While the game loads there are no frames, and it
-            // clears and fills the RAM a pack's code and tables sit in (aki-roadmap#205: a 7-word cave compiled as 32 KB of
-            // whatever was there). So write the table again before entering its code, at most once a millisecond: a caller
-            // can enter hundreds of times in a loop, and a pass over a big table is a sizeable fraction of that.
-            using clock = std::chrono::steady_clock;
-            static std::atomic<int64_t> last_ns{ std::numeric_limits<int64_t>::min() / 2 };
-            const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now().time_since_epoch()).count();
-            if ((now - last_ns.load(std::memory_order_relaxed)) > 1000000) {
-                last_ns.store(now, std::memory_order_relaxed);
-                recomp::mods::conversion::codes::apply(*live_table, live_table_rdram, live_table_rdram_size);
+            // may clear the RAM a pack's code sits in, so write that code again before entering it. Only the units that
+            // write this stretch: the rest of the table writes game data, and writing that from inside a running
+            // function, at a moment the game never sees a GameShark write, can break what the function is building.
+            {
+                static std::mutex cave_mutex{};
+                static std::unordered_map<uint32_t, std::vector<recomp::mods::conversion::codes::Code>> cave_units{};
+                std::lock_guard lock{ cave_mutex };
+                for (const live_codes::CodeRange& r : live_pack_writes) {
+                    if (a >= r.start && a < r.end) {
+                        auto it = cave_units.find(r.start);
+                        if (it == cave_units.end()) {
+                            it = cave_units.emplace(r.start, live_codes::units_writing(*live_table, r)).first;
+                        }
+                        recomp::mods::conversion::codes::apply(it->second, live_table_rdram, live_table_rdram_size);
+                        break;
+                    }
+                }
             }
             return compile_ram_function(addr);
         }
@@ -2838,8 +2843,8 @@ void recomp::mods::live_codes::after_apply(const std::vector<conversion::codes::
                     live_version_entries[n] = LiveVersionEntry{ reinterpret_cast<uintptr_t>(version), vram };
                     live_version_count.store(n + 1);
                 }
-                fprintf(stderr, "[live codes] 0x%08X (%u bytes) version %zu compiled in %.2f ms (total %llu compiles, %.1f ms)%s\n",
-                    vram, f.watch.func.size, f.state.compiled.size(), ms, (unsigned long long)live_stats.compiles, live_stats.compile_ms,
+                fprintf(stderr, "[live codes] 0x%08X (%u bytes) version %zu compiled in %.2f ms (total %llu compiles, %.1f ms) host %p%s\n",
+                    vram, f.watch.func.size, f.state.compiled.size(), ms, (unsigned long long)live_stats.compiles, live_stats.compile_ms, (void*)version,
                     f.repaired ? "; repaired by the port, this version loses the repair" : "");
             }
             if (!live_install(f, f.versions[key])) {

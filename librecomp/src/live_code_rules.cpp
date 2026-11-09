@@ -51,6 +51,44 @@ namespace recomp::mods::live_codes {
         return words;
     }
 
+    bool is_branch_word(uint32_t w) {
+        const uint32_t op = w >> 26, rs = (w >> 21) & 31, rt = (w >> 16) & 31;
+        return ((op >= 4) && (op <= 7)) || ((op >= 0x14) && (op <= 0x17)) ||
+            ((op == 1) && ((rt <= 3) || ((rt >= 0x10) && (rt <= 0x13)))) ||
+            ((op == 0x11) && (rs == 8));   // bc1: the rope builder Legends hooks branches on float compares (aki-roadmap#245)
+    }
+
+    std::vector<conversion::codes::Code> units_writing(const std::vector<conversion::codes::Code> &codes, CodeRange range) {
+        std::vector<conversion::codes::Code> out;
+        size_t i = 0;
+        while (i < codes.size()) {
+            // a unit: its conditionals, then a write or a repeater with its write
+            const size_t first = i;
+            while ((i < codes.size()) && (codes[i].type >= 0xD0) && (codes[i].type <= 0xD3)) i++;
+            if (i >= codes.size()) break;
+            bool hits = false;
+            size_t last = i;
+            const conversion::codes::Code &c = codes[i];
+            if (is_write(c.type)) {
+                hits = in_code_ranges(c.addr & ~3u, std::span<const CodeRange>(&range, 1));
+            }
+            else if ((c.type == 0x50) && ((i + 1) < codes.size()) && is_write(codes[i + 1].type)) {
+                const uint32_t count = (c.addr >> 8) & 0xFF;
+                const uint32_t step = c.addr & 0xFF;
+                for (uint32_t k = 0; (k < count) && !hits; k++) {
+                    hits = in_code_ranges((codes[i + 1].addr + k * step) & ~3u, std::span<const CodeRange>(&range, 1));
+                }
+                last = i + 1;
+            }
+            if (hits) {
+                out.insert(out.end(), codes.begin() + first, codes.begin() + last + 1);
+            }
+            i = last + 1;
+        }
+
+        return out;
+    }
+
     std::vector<Watch> build_watches(const std::vector<uint32_t> &words, std::span<const FunctionSpan> functions) {
         std::vector<Watch> watches;
         for (const FunctionSpan &f : functions) {

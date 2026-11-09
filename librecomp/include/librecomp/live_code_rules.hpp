@@ -57,6 +57,14 @@ namespace recomp::mods::live_codes {
     // The words a codes table can write as ranges, for checking a hook's target. Unsorted, repeats are fine.
     std::vector<CodeRange> ranges_of_words(const std::vector<uint32_t> &words);
 
+    // Is this word a conditional or relative branch (beq/bne/blez/bgtz and their likely forms, the regimm branches, and
+    // bc1f/bc1t/bc1fl/bc1tl)? Used to trace the extent of code in RAM; j/jal/jr aren't branches here.
+    bool is_branch_word(uint32_t w);
+
+    // The units of a table (conditionals with the write they govern, a repeater with its write) that write into range,
+    // in table order. Running just these refreshes a pack's code in RAM without touching anything else the table writes.
+    std::vector<conversion::codes::Code> units_writing(const std::vector<conversion::codes::Code> &codes, CodeRange range);
+
     // Does a watched word now leave the function in a way the ROM's word didn't: a j or jal outside these ranges, a
     // branch outside the function, or a jr or jalr through a register other than ra? Such a word hooks into code the
     // pack puts in RAM. A j or jal into `pack_writes` (what the table can write) is that code, as long as something is

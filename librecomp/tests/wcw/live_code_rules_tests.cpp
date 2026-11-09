@@ -226,6 +226,56 @@ TEST_CASE("live codes: written words become ranges") {
     CHECK(ranges_of_words({}).empty());
 }
 
+TEST_CASE("live codes: branch words for tracing RAM code, float branches included") {
+    // No Mercy's rope builder func_80021B10 (aki-roadmap#245)
+    CHECK(is_branch_word(0x1440FFE6u));   // 0x80021C48 bne v0,zero
+    CHECK(is_branch_word(0x45020004u));   // 0x80021B84 bc1fl: missed before, which split the function into extra pieces
+    CHECK(is_branch_word(0x45010006u));   // 0x80021C90 bc1t
+    CHECK(is_branch_word(0x45000001u));   // bc1f
+    CHECK(is_branch_word(0x45030001u));   // bc1tl
+    CHECK(is_branch_word(0x04410003u));   // bgez
+    CHECK(is_branch_word(0x04110003u));   // bgezal
+    CHECK(is_branch_word(0x50400002u));   // beql
+    CHECK(!is_branch_word(0x080086FEu));  // j: a jump, not a branch
+    CHECK(!is_branch_word(0x0C006000u));  // jal
+    CHECK(!is_branch_word(0x03E00008u));  // jr ra
+    CHECK(!is_branch_word(0x44820000u));  // mtc1 (op 0x11, rs 4)
+    CHECK(!is_branch_word(0x46080032u));  // c.eq.s (op 0x11, rs 16)
+    CHECK(!is_branch_word(0x04080001u));  // regimm rt 8 (tgei): no branch
+}
+
+TEST_CASE("live codes: units_writing keeps only the units that write the range, conditions and repeaters whole") {
+    // Legends' Ring Ropes (aki-roadmap#245): the hook into game code under its D1 check, the cave, the colour table.
+    const std::vector<Code> table = {
+        code(0xD1, 0x80021BECu, 0x8042), code(0x81, 0x80021BF0u, 0x0817),  // hook, guarded
+        code(0x81, 0x805E0074u, 0x3C01), code(0x81, 0x805E0076u, 0x8005),  // cave
+        code(0xD0, 0x800D9968u, 0x3C), code(0xD1, 0x8015982Cu, 0x1234), code(0x81, 0x805E0078u, 0x0008), // stacked guards
+        code(0x81, 0x80052860u, 0x1000),                                     // colour table: game data
+        code(0x50, 0x00000204u, 0x0001), code(0x81, 0x805E0080u, 0x2400),   // repeater into the cave (0x80, 0x84)
+        code(0x50, 0x00000204u, 0x0001), code(0x81, 0x805E0100u, 0x2400),   // repeater elsewhere
+    };
+    const std::vector<Code> cave = units_writing(table, CodeRange{ 0x805E0074u, 0x805E00A8u });
+    CHECK(cave.size() == 7);
+    if (cave.size() != 7) return;
+    CHECK(cave[0].addr == 0x805E0074u);
+    CHECK(cave[1].addr == 0x805E0076u);
+    CHECK(cave[2].type == 0xD0);          // both guards of the stacked unit come with it
+    CHECK(cave[3].type == 0xD1);
+    CHECK(cave[4].addr == 0x805E0078u);
+    CHECK(cave[5].type == 0x50);          // the repeater with its write
+    CHECK(cave[6].addr == 0x805E0080u);
+
+    const std::vector<Code> hook = units_writing(table, CodeRange{ 0x80021BF0u, 0x80021BF4u });
+    CHECK(hook.size() == 2);
+    if (hook.size() == 2) CHECK(hook[0].type == 0xD1);
+
+    // a repeater whose first write misses but a later one hits
+    const std::vector<Code> late = units_writing({ code(0x50, 0x00000410u, 0), code(0x81, 0x805E0040u, 0) }, CodeRange{ 0x805E0070u, 0x805E0074u });
+    CHECK(late.size() == 2);
+    CHECK(units_writing(table, CodeRange{ 0x80400000u, 0x80400010u }).empty());
+    CHECK(units_writing({ code(0xD1, 0x80000000u, 0) }, CodeRange{ 0x80000000u, 0x80000010u }).empty()); // dangling guard
+}
+
 TEST_CASE("live codes: a hook written in two halves is judged by the word it makes") {
     Memory m;
     const Watch w = watch_word1();
