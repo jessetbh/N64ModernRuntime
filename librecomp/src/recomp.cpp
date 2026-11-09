@@ -1172,23 +1172,28 @@ void recomp::start(
     ultramodern::join_thread_cleaner_thread();
     ultramodern::join_saving_thread();
 
-    if (!game_threads_parked) {
-        // A game thread is still running and may read rdram; leave it mapped for the OS to
-        // reclaim at process exit.
-        return;
-    }
-
-    // Free rdram.
-    bool free_failed;
+    recomp::finish_shutdown(game_threads_parked,
+        [&]() {
+            // Free rdram.
+            bool free_failed;
 #ifdef _WIN32
-    // VirtualFree returns zero on failure.
-    free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
+            // VirtualFree returns zero on failure.
+            free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
 #else
-    // munmap returns -1 on failure.
-    free_failed = (munmap(rdram, allocation_size) == -1);
+            // munmap returns -1 on failure.
+            free_failed = (munmap(rdram, allocation_size) == -1);
 #endif
 
-    if (free_failed) {
-        printf("Failed to free rdram\n");
-    }
+            if (free_failed) {
+                printf("Failed to free rdram\n");
+            }
+        },
+        []() {
+            // aki-roadmap#252: a game thread is still running and may read rdram or anything else, so rdram
+            // stays mapped and no static destructor runs under it. _Exit skips atexit; on Windows the OS
+            // stops the other threads before any DLL detaches.
+            fprintf(stderr, "[wcw] shutdown: ending the process now, a game thread is still running\n");
+            fflush(nullptr);   // every open stream: _Exit flushes none (diagnostic CSVs keep their tail)
+            std::_Exit(0);
+        });
 }
