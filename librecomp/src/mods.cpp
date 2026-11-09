@@ -1307,6 +1307,18 @@ std::vector<recomp::mods::ModContext::OpenedModKind> recomp::mods::ModContext::o
     return out;
 }
 
+bool recomp::mods::ModContext::read_opened_mod_file(const std::string& mod_id, const std::string& path, std::vector<char>& out) {
+    std::unique_lock lock(opened_mods_mutex);
+    for (const ModHandle &mod : opened_mods) {
+        if (mod.manifest.mod_id == mod_id && mod.manifest.file_handle) {
+            bool exists = false;
+            out = mod.manifest.file_handle->read_file(path, exists);
+            return exists;
+        }
+    }
+    return false;
+}
+
 void recomp::mods::ModContext::apply_session_enabled_mods(const std::unordered_set<std::string>& session_mods) {
     session_only_config = true;
     std::vector<std::string> ids = opened_mod_ids_from(0);

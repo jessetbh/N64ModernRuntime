@@ -55,11 +55,51 @@ namespace recomp {
                 std::string textures_naming;
                 std::string rt_lights_file;
                 std::string rt_materials_file;
+                // aki.json "models" (aki-roadmap#226): the conversion's own model packs, which replace the player's
+                // while it runs. {"dir": "models", "format": 2, "roster": "models/roster.json",
+                //  "slots": [{"wrestler": "0x0404", "name": "Kenny Omega", "costume": 0, "pack": "kenny"}]}
+                // dir: a folder in the conversion with the packs (<pack>.akimodel/) and any -hd.rtz is beside them in the
+                // conversion folder. format: the AKP1 version the packs were built for (ModelsFormat at most). slots:
+                // who each pack replaces, by the hack's own wrestler ids (roster: the hack's roster, for the tools and
+                // the launcher); the game's model host serves them as models.txt. Without slots, dir/models.txt is read.
+                // An optional v1 component: older builds ignore it and run the conversion without models.
+                struct ModelSlot {
+                    uint32_t wrestler = 0;
+                    int costume = -1;           // -1: every costume
+                    std::string name;           // for people (the launcher, the log)
+                    std::string pack;           // <pack>.akimodel in dir
+                };
+                bool has_models = false;
+                std::string models_dir;
+                int models_format = 0;
+                std::string models_roster;
+                std::vector<ModelSlot> models_slots;
+                bool models_has_slots = false;  // "slots" given (even empty: then no wrestler changes)
+                // Why this session runs without the conversion's models, "" when it runs with them: a bad models
+                // component (from parse), or the patch's memory use (models_refusal, at the mod scan).
+                std::string models_refusal;
                 // aki.json "addons": {"allow": "none" | "data" | "all", "mods": ["aki_camera", ...]}. Listed code add-ons
                 // run under "data" too (the conversion's allow-list).
                 AddonsAllow addons_allow = AddonsAllow::Data;
                 std::vector<std::string> addons_mods;
             };
+
+            // The model import mod (AkiMods aki_modelimport), on for a session whose conversion has usable models.
+            constexpr const char *ModelsModId = "aki_modelimport";
+            // Model packs load into the N64's Expansion RAM window, physical 0x00400000-0x00800000 (AkiMods
+            // mods/modelimport/mod.psd1: MI_MEM_BASE .. MI_SCRATCH + 256 KB). A relinked hack whose relink.json puts
+            // code, data, preloads or zeroed ranges there owns that memory (Born to be Wired, No Mercy Plus, Legends).
+            // The newest model pack format (AKP1 header version) this build reads; AkiMods modelimport AKP1_VERSION.
+            constexpr int ModelsFormat = 2;
+            // The models.txt the model host serves for slots: one "<pack> wrestler 0x<id> [costume <n>]" line each.
+            std::string models_txt(const std::vector<Conversion::ModelSlot> &slots);
+            constexpr uint32_t ModelsWindowStart = 0x00400000;
+            constexpr uint32_t ModelsWindowEnd = 0x00800000;
+            // Why a conversion's models can't load beside its patch, "" when they can (aki-roadmap#226). relink_json:
+            // the text of the patch's relink.json, "" when it has none (a plain patch: always fine). Refused: any
+            // code_ranges / data_ranges / preload / zero range overlapping the models window, or a relink.json that
+            // doesn't parse. Moving the packs above 8 MB (aki-roadmap#156) lifts this.
+            std::string models_refusal(const std::string &relink_json);
 
             // [a-z0-9_.-]{1,48}, not starting with '.' or '_': ids are folder names (and '_packages' is reserved).
             bool valid_id(const std::string &id);
@@ -148,6 +188,16 @@ namespace recomp {
         std::string conversion_choice_notice();
         // The active conversion's codes file text, or "" (no conversion, no codes, or codes for another revision).
         std::string active_conversion_codes();
+        // aki-roadmap#226: records why the active conversion's models can't load (conversion::models_refusal), "" when
+        // they can. Called at the mod scan, before the session's mods are decided. No-op without a conversion.
+        void set_active_conversion_models_refusal(const std::string &reason);
+        // The folder the game's model host reads while the active conversion runs: <conversion>/<models dir>. Empty
+        // when there is no conversion, it has no models component, or its models are refused (then the host must
+        // read nothing at all, not the player's own packs, which would land in the same memory).
+        std::filesystem::path active_conversion_models_dir();
+        // The models.txt for the active conversion's slots (conversion::models_txt), or false when the model host
+        // should read dir/models.txt itself (no slots, or no usable models).
+        bool active_conversion_models_txt(std::string &out);
         // The ROM revision tag codes must have to run on this port (e.g. "nomercy-rev1"); set by the game.
         void set_port_rom_revision(const std::string &tag);
         // The cheats engine's mod id (AkiMods cheats), enabled with a conversion that has codes; set by the game.

@@ -229,6 +229,23 @@ void recomp::mods::scan_mods() {
             }
         }
         conversion_mod_ids = mod_context->opened_mod_ids_from(stock_mod_count);
+        // aki-roadmap#226: whether the conversion's models fit beside its patch, decided before the session's mods.
+        const conversion::Conversion *active = active_conversion();
+        if (active && active->has_models) {
+            std::string relink;
+            for (const ModContext::OpenedModKind &m : mod_context->opened_mod_kinds(stock_mod_count, mod_context->num_opened_mods())) {
+                std::vector<char> bytes;
+                if (m.rom_patch && mod_context->read_opened_mod_file(m.id, "relink.json", bytes)) {
+                    relink.assign(bytes.begin(), bytes.end());
+                }
+            }
+            // A bad models component (parse) already says why; otherwise the patch's memory use decides.
+            const std::string refusal = active->models_refusal.empty() ? conversion::models_refusal(relink) : active->models_refusal;
+            set_active_conversion_models_refusal(refusal);
+            if (!refusal.empty()) {
+                fprintf(stderr, "[conversion] models refused: %s. Running without its models.\n", refusal.c_str());
+            }
+        }
     }
     for (const auto& cur_error : mod_open_errors) {
         printf("Error opening mod " PATHFMT ": %s (%s)\n", cur_error.mod_path.c_str(), recomp::mods::error_to_string(cur_error.error).c_str(), cur_error.error_param.c_str());
