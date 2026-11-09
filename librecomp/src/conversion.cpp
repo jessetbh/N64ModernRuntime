@@ -283,6 +283,32 @@ namespace recomp::mods {
             }
         }
 
+        // aki-roadmap#242: seed saves the launcher's Install didn't copy (a conversion copied in by hand, built in place,
+        // or a test run), before the game reads its save. Never over an existing file.
+        if (!c.seed_saves.empty()) {
+            const conversion::SeedReport seeded = conversion::seed_saves(c, folder, config_path / u8"saves" / std::filesystem::u8path(c.id));
+            for (const std::string &line : seeded.lines) {
+                fprintf(stderr, "[conversion] %s\n", line.c_str());
+            }
+        }
+
+        // aki-roadmap#241: the conversion's RT rig without the launcher's WCW_RT_LIGHTS_FILE (Mods-menu choice, AKI_CONVERSION
+        // by hand). rt64 reads the variable at its first ray-traced frame, after this scan.
+        const std::filesystem::path rt_lights = conversion::rt_lights_path(c, folder, std::getenv("WCW_RT_LIGHTS_FILE"));
+        if (!rt_lights.empty()) {
+#ifdef _WIN32
+            _wputenv_s(L"WCW_RT_LIGHTS_FILE", rt_lights.wstring().c_str());
+#else
+            setenv("WCW_RT_LIGHTS_FILE", rt_lights.string().c_str(), 1);
+#endif
+            const std::u8string text = rt_lights.u8string();
+            fprintf(stderr, "[conversion] rt lights: %.*s\n", int(text.size()), reinterpret_cast<const char *>(text.data()));
+        }
+        if (!c.rt_materials_file.empty()) {
+            fprintf(stderr, "[conversion] rt materials %s ignored: per-surface materials aren't supported yet (aki-roadmap#95)\n",
+                c.rt_materials_file.c_str());
+        }
+
         fprintf(stderr, "[conversion] running %s (\"%s\"):%s%s%s%s%s%s; saves in saves/%s\n", c.id.c_str(), c.name.c_str(),
             c.has_patch ? " patch" : "", c.has_codes ? " codes" : "", c.has_saves ? " saves" : "", c.has_textures ? " textures" : "",
             c.has_rt ? " rt" : "", c.has_models ? " models" : "", c.id.c_str());
