@@ -2438,15 +2438,13 @@ static recomp_func_t* compile_ram_function(int32_t addr) {
             while (pc >= a && pc < limit && !seen.contains(pc)) {
                 seen.insert(pc);
                 const uint32_t w = word(pc);
-                const uint32_t op = w >> 26, rt = (w >> 16) & 31;
+                const uint32_t op = w >> 26;
                 // one ends the code (don't trace on into data)
                 if (word_not_game_code(w)) {
                     break;
                 }
                 end = std::max(end, pc + 8);
-                const bool branch = (op >= 4 && op <= 7) || (op >= 0x14 && op <= 0x17) ||
-                    (op == 1 && (rt <= 3 || (rt >= 0x10 && rt <= 0x13)));
-                if (branch) {
+                if (recomp::mods::live_codes::is_branch_word(w)) {
                     const uint32_t t = pc + 4 + (uint32_t)((int32_t)(int16_t)(w & 0xFFFF) << 2);
                     if (!minimal && t >= a && t < limit && !seen.contains(t)) {
                         work.push_back(t);
@@ -2531,6 +2529,10 @@ namespace {
 
     std::vector<LiveFunction> live_functions{};
     std::vector<live_codes::CodeRange> live_code_ranges{};
+    std::vector<live_codes::CodeRange> live_pack_writes{}; // what the table can write: a hook may jump there
+    const std::vector<recomp::mods::conversion::codes::Code>* live_table = nullptr;
+    uint8_t* live_table_rdram = nullptr;
+    uint32_t live_table_rdram_size = 0;
     LiveStats live_stats{};
     bool live_switch_log = false;
 
@@ -2630,10 +2632,36 @@ namespace {
     }
 
     // A version's lookup of an address with no function: a version can re-enter a function in the middle, so code in a
-    // loaded section is compiled. Anywhere else stays the fatal "Failed to find function": RDRAM there isn't code, and
-    // compiling it would chain from one stretch of RAM to the next without ever yielding.
+    // loaded section is compiled, and so is code the table writes, where a hook goes (aki-roadmap#205). Anywhere else stays
+    // the fatal "Failed to find function": RDRAM there isn't code, and compiling it would chain from one stretch of RAM to
+    // the next without ever yielding.
     recomp_func_t* live_missing_function(int32_t addr) {
-        return live_codes::in_code_ranges(static_cast<uint32_t>(addr), live_loaded_code()) ? compile_ram_function(addr) : nullptr;
+        const uint32_t a = static_cast<uint32_t>(addr);
+        if (live_codes::in_code_ranges(a, live_pack_writes)) {
+            // The table runs once per game frame, a GameShark once per VI. While the game loads there are no frames, and it
+            // may clear the RAM a pack's code sits in, so write that code again before entering it. Only the units that
+            // write this stretch: the rest of the table writes game data, and writing that from inside a running
+            // function, at a moment the game never sees a GameShark write, can break what the function is building.
+            // Never inside game code (a version re-entering mid-function at a hook site): that would write game code from
+            // inside a running function. Pack code lives outside the code sections.
+            if (!live_codes::in_code_ranges(a, live_code_ranges)) {
+                static std::mutex cave_mutex{};
+                static std::unordered_map<uint32_t, std::vector<recomp::mods::conversion::codes::Code>> cave_units{};
+                std::lock_guard lock{ cave_mutex };
+                for (const live_codes::CodeRange& r : live_pack_writes) {
+                    if (a >= r.start && a < r.end) {
+                        auto it = cave_units.find(r.start);
+                        if (it == cave_units.end()) {
+                            it = cave_units.emplace(r.start, live_codes::units_writing(*live_table, r)).first;
+                        }
+                        recomp::mods::conversion::codes::apply(it->second, live_table_rdram, live_table_rdram_size);
+                        break;
+                    }
+                }
+            }
+            return compile_ram_function(addr);
+        }
+        return live_codes::in_code_ranges(a, live_loaded_code()) ? compile_ram_function(addr) : nullptr;
     }
 
     bool live_setup(const std::vector<recomp::mods::conversion::codes::Code>& codes) {
@@ -2644,6 +2672,11 @@ namespace {
         }
         live_switch_log = getenv("WCW_LIVE_CODES_LOG") != nullptr;
         const std::vector<uint32_t> words = live_codes::written_words(codes);
+        const char* hooks_env = getenv("WCW_LIVE_HOOKS");
+        if (hooks_env == nullptr || strcmp(hooks_env, "0") != 0) {
+            live_pack_writes = live_codes::ranges_of_words(words);
+            live_table = &codes;
+        }
 
         std::vector<live_codes::FunctionSpan> spans{};
         std::vector<std::pair<uint16_t, recomp_func_t*>> owners{};
@@ -2711,6 +2744,8 @@ void recomp::mods::live_codes::after_apply(const std::vector<conversion::codes::
     if (!enabled) {
         return;
     }
+    live_table_rdram = rdram;
+    live_table_rdram_size = rdram_size;
 
     const std::span<const uint8_t> rom = recomp::get_rom();
     const auto start = clock::now();
@@ -2746,11 +2781,11 @@ void recomp::mods::live_codes::after_apply(const std::vector<conversion::codes::
             }
         }
         else {
-            const ExitCheck exits = check_exits(f.watch, rdram, rdram_size, rom, live_code_ranges, live_loaded_code());
+            const ExitCheck exits = check_exits(f.watch, rdram, rdram_size, rom, live_code_ranges, live_loaded_code(), live_pack_writes);
             if (exits == ExitCheck::Never) {
                 f.state.failed.insert(key);
                 live_stats.hooks++;
-                fprintf(stderr, "[live codes] 0x%08X: hooks into RAM outside known code; not compiled\n", vram);
+                fprintf(stderr, "[live codes] 0x%08X: hooks into RAM the table doesn't write; not compiled\n", vram);
                 continue;
             }
             if (exits == ExitCheck::NotNow) {
@@ -2810,8 +2845,8 @@ void recomp::mods::live_codes::after_apply(const std::vector<conversion::codes::
                     live_version_entries[n] = LiveVersionEntry{ reinterpret_cast<uintptr_t>(version), vram };
                     live_version_count.store(n + 1);
                 }
-                fprintf(stderr, "[live codes] 0x%08X (%u bytes) version %zu compiled in %.2f ms (total %llu compiles, %.1f ms)%s\n",
-                    vram, f.watch.func.size, f.state.compiled.size(), ms, (unsigned long long)live_stats.compiles, live_stats.compile_ms,
+                fprintf(stderr, "[live codes] 0x%08X (%u bytes) version %zu compiled in %.2f ms (total %llu compiles, %.1f ms) host %p%s\n",
+                    vram, f.watch.func.size, f.state.compiled.size(), ms, (unsigned long long)live_stats.compiles, live_stats.compile_ms, (void*)version,
                     f.repaired ? "; repaired by the port, this version loses the repair" : "");
             }
             if (!live_install(f, f.versions[key])) {

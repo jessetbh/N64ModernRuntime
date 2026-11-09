@@ -186,6 +186,106 @@ TEST_CASE("live codes: a jump into RAM outside known code is caught") {
     CHECK(!hooks_outside_code(w, m.rdram.data(), 16, m.rom, code));
 }
 
+TEST_CASE("live codes: a jump into what the table writes is the pack's code, once it's there") {
+    // 32 bytes of RAM: the watched word at 0x80000004, the pack's code at 0x80000010.
+    std::vector<uint8_t> rdram(32);
+    std::vector<uint8_t> rom(32);
+    const auto set = [&](uint32_t index, uint32_t value) { std::memcpy(rdram.data() + index * 4, &value, 4); };
+    Watch w{};
+    w.func = FunctionSpan{ 0x80000000u, 0, 16, 0 };
+    w.words = { 0x80000004u };
+    const std::vector<CodeRange> code = { { 0x80000000u, 0x80000010u } };
+    const std::vector<CodeRange> pack = { { 0x80000010u, 0x80000018u } };
+
+    set(1, 0x08000004u);                   // j 0x80000010
+    CHECK(hooks_outside_code(w, rdram.data(), 32, rom, code));          // no table: refused
+    CHECK(hooks_outside_code(w, rdram.data(), 32, rom, code, pack));    // nothing there yet
+    set(4, 0x3C011234u);
+    CHECK(!hooks_outside_code(w, rdram.data(), 32, rom, code, pack));   // written: followed
+    CHECK(check_exits(w, rdram.data(), 32, rom, code, code, pack) == ExitCheck::Fine);
+    set(4, 0);
+    CHECK(check_exits(w, rdram.data(), 32, rom, code, code, pack) == ExitCheck::NotNow); // may be written later
+    CHECK(check_exits(w, rdram.data(), 32, rom, code, code) == ExitCheck::Never);
+
+    set(4, 0x3C011234u);
+    set(1, 0x08000007u);                   // j 0x8000001C: a target the table doesn't write, the old-revision case
+    CHECK(hooks_outside_code(w, rdram.data(), 32, rom, code, pack));
+    CHECK(check_exits(w, rdram.data(), 32, rom, code, code, pack) == ExitCheck::Never);
+    set(1, 0x00200008u);                   // jr at: still refused, the table says nothing about where that goes
+    CHECK(hooks_outside_code(w, rdram.data(), 32, rom, code, pack));
+}
+
+TEST_CASE("live codes: written words become ranges") {
+    const std::vector<CodeRange> r = ranges_of_words({ 0x80000108u, 0x80000100u, 0x80000104u, 0x80000104u, 0x80000200u });
+    CHECK(r.size() == 2);
+    if (r.size() != 2) return;
+    CHECK(r[0].start == 0x80000100u);
+    CHECK(r[0].end == 0x8000010Cu);
+    CHECK(r[1].start == 0x80000200u);
+    CHECK(r[1].end == 0x80000204u);
+    CHECK(ranges_of_words({}).empty());
+}
+
+TEST_CASE("live codes: branch words for tracing RAM code, float branches included") {
+    // No Mercy's rope builder func_80021B10 (aki-roadmap#245)
+    CHECK(is_branch_word(0x1440FFE6u));   // 0x80021C48 bne v0,zero
+    CHECK(is_branch_word(0x45020004u));   // 0x80021B84 bc1fl: missed before, which split the function into extra pieces
+    CHECK(is_branch_word(0x45010006u));   // 0x80021C90 bc1t
+    CHECK(is_branch_word(0x45000001u));   // bc1f
+    CHECK(is_branch_word(0x45030001u));   // bc1tl
+    CHECK(is_branch_word(0x04410003u));   // bgez
+    CHECK(is_branch_word(0x04110003u));   // bgezal
+    CHECK(is_branch_word(0x50400002u));   // beql
+    CHECK(!is_branch_word(0x080086FEu));  // j: a jump, not a branch
+    CHECK(!is_branch_word(0x0C006000u));  // jal
+    CHECK(!is_branch_word(0x03E00008u));  // jr ra
+    CHECK(!is_branch_word(0x44820000u));  // mtc1 (op 0x11, rs 4)
+    CHECK(!is_branch_word(0x46080032u));  // c.eq.s (op 0x11, rs 16)
+    CHECK(!is_branch_word(0x04080001u));  // regimm rt 8 (tgei): no branch
+}
+
+TEST_CASE("live codes: units_writing keeps only the units that write the range, conditions and repeaters whole") {
+    // Legends' Ring Ropes (aki-roadmap#245): the hook into game code under its D1 check, the cave, the colour table.
+    const std::vector<Code> table = {
+        code(0xD1, 0x80021BECu, 0x8042), code(0x81, 0x80021BF0u, 0x0817),  // hook, guarded
+        code(0x81, 0x805E0074u, 0x3C01), code(0x81, 0x805E0076u, 0x8005),  // cave
+        code(0xD0, 0x800D9968u, 0x3C), code(0xD1, 0x8015982Cu, 0x1234), code(0x81, 0x805E0078u, 0x0008), // stacked guards
+        code(0x81, 0x80052860u, 0x1000),                                     // colour table: game data
+        code(0x50, 0x00000204u, 0x0001), code(0x81, 0x805E0080u, 0x2400),   // repeater into the cave (0x80, 0x84)
+        code(0x50, 0x00000204u, 0x0001), code(0x81, 0x805E0100u, 0x2400),   // repeater elsewhere
+    };
+    const std::vector<Code> cave = units_writing(table, CodeRange{ 0x805E0074u, 0x805E00A8u });
+    CHECK(cave.size() == 7);
+    if (cave.size() != 7) return;
+    CHECK(cave[0].addr == 0x805E0074u);
+    CHECK(cave[1].addr == 0x805E0076u);
+    CHECK(cave[2].type == 0xD0);          // both guards of the stacked unit come with it
+    CHECK(cave[3].type == 0xD1);
+    CHECK(cave[4].addr == 0x805E0078u);
+    CHECK(cave[5].type == 0x50);          // the repeater with its write
+    CHECK(cave[6].addr == 0x805E0080u);
+
+    const std::vector<Code> hook = units_writing(table, CodeRange{ 0x80021BF0u, 0x80021BF4u });
+    CHECK(hook.size() == 2);
+    if (hook.size() == 2) CHECK(hook[0].type == 0xD1);
+
+    // a repeater whose first write misses but a later one hits
+    const std::vector<Code> late = units_writing({ code(0x50, 0x00000410u, 0), code(0x81, 0x805E0040u, 0) }, CodeRange{ 0x805E0070u, 0x805E0074u });
+    CHECK(late.size() == 2);
+    CHECK(units_writing(table, CodeRange{ 0x80400000u, 0x80400010u }).empty());
+    CHECK(units_writing({ code(0xD1, 0x80000000u, 0) }, CodeRange{ 0x80000000u, 0x80000010u }).empty()); // dangling guard
+
+    // malformed repeaters: apply() skips the 50 together with the unit after it, so the refresh must not take that unit
+    const CodeRange r{ 0x80000000u, 0x80000010u };
+    CHECK(units_writing({ code(0x50, 0x0204u, 0), code(0xD1, 0x80000020u, 0), code(0x81, 0x80000000u, 1) }, r).empty());
+    CHECK(units_writing({ code(0x50, 0x0204u, 0), code(0x50, 0x0204u, 0), code(0x81, 0x80000000u, 1) }, r).empty());
+    const std::vector<Code> after = units_writing({ code(0x50, 0x0204u, 0), code(0xD1, 0x80000020u, 0), code(0x81, 0x80000000u, 1),
+                                                    code(0x81, 0x80000004u, 2) }, r);
+    CHECK(after.size() == 1);                 // the unit after the skipped one is read normally
+    if (after.size() == 1) CHECK(after[0].addr == 0x80000004u);
+    CHECK(units_writing({ code(0xD1, 0x80000020u, 0), code(0x50, 0x0204u, 0) }, r).empty()); // repeater at the end
+}
+
 TEST_CASE("live codes: a hook written in two halves is judged by the word it makes") {
     Memory m;
     const Watch w = watch_word1();

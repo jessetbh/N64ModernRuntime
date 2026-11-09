@@ -51,6 +51,51 @@ namespace recomp::mods::live_codes {
         return words;
     }
 
+    bool is_branch_word(uint32_t w) {
+        const uint32_t op = w >> 26, rs = (w >> 21) & 31, rt = (w >> 16) & 31;
+        return ((op >= 4) && (op <= 7)) || ((op >= 0x14) && (op <= 0x17)) ||
+            ((op == 1) && ((rt <= 3) || ((rt >= 0x10) && (rt <= 0x13)))) ||
+            ((op == 0x11) && (rs == 8));   // bc1: the rope builder Legends hooks branches on float compares (aki-roadmap#245)
+    }
+
+    std::vector<conversion::codes::Code> units_writing(const std::vector<conversion::codes::Code> &codes, CodeRange range) {
+        std::vector<conversion::codes::Code> out;
+        size_t i = 0;
+        while (i < codes.size()) {
+            // a unit: its conditionals, then a write or a repeater with its write
+            const size_t first = i;
+            while ((i < codes.size()) && (codes[i].type >= 0xD0) && (codes[i].type <= 0xD3)) i++;
+            if (i >= codes.size()) break;
+            bool hits = false;
+            size_t last = i;
+            const conversion::codes::Code &c = codes[i];
+            if (is_write(c.type)) {
+                hits = in_code_ranges(c.addr & ~3u, std::span<const CodeRange>(&range, 1));
+            }
+            else if ((c.type == 0x50) && ((i + 1) < codes.size()) && is_write(codes[i + 1].type)) {
+                const uint32_t count = (c.addr >> 8) & 0xFF;
+                const uint32_t step = c.addr & 0xFF;
+                for (uint32_t k = 0; (k < count) && !hits; k++) {
+                    hits = in_code_ranges((codes[i + 1].addr + k * step) & ~3u, std::span<const CodeRange>(&range, 1));
+                }
+                last = i + 1;
+            }
+            else if (c.type == 0x50) {
+                // a repeater before anything but a write isn't a GameShark form: apply() skips it with the unit after
+                // it, so that unit isn't taken either
+                size_t j = i + 1;
+                while ((j < codes.size()) && ((codes[j].type == 0x50) || ((codes[j].type >= 0xD0) && (codes[j].type <= 0xD3)))) j++;
+                last = std::min(j, codes.size() - 1);
+            }
+            if (hits) {
+                out.insert(out.end(), codes.begin() + first, codes.begin() + last + 1);
+            }
+            i = last + 1;
+        }
+
+        return out;
+    }
+
     std::vector<Watch> build_watches(const std::vector<uint32_t> &words, std::span<const FunctionSpan> functions) {
         std::vector<Watch> watches;
         for (const FunctionSpan &f : functions) {
@@ -103,7 +148,24 @@ namespace recomp::mods::live_codes {
         return false;
     }
 
-    bool hooks_outside_code(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom, std::span<const CodeRange> code) {
+    std::vector<CodeRange> ranges_of_words(const std::vector<uint32_t> &words) {
+        std::vector<uint32_t> sorted = words;
+        std::sort(sorted.begin(), sorted.end());
+        std::vector<CodeRange> ranges;
+        for (uint32_t word : sorted) {
+            if (!ranges.empty() && (word <= ranges.back().end)) {
+                ranges.back().end = std::max(ranges.back().end, word + 4);
+            }
+            else {
+                ranges.push_back(CodeRange{ word, word + 4 });
+            }
+        }
+
+        return ranges;
+    }
+
+    bool hooks_outside_code(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom, std::span<const CodeRange> code,
+        std::span<const CodeRange> pack_writes) {
         for (uint32_t addr : watch.words) {
             uint32_t w, rom_word;
             if (!read_rdram_word(rdram, rdram_size, addr, w) || !read_rom_word(rom, watch.func.rom + (addr - watch.func.vram), rom_word)) {
@@ -111,14 +173,18 @@ namespace recomp::mods::live_codes {
             }
 
             if (w == rom_word) continue;
-            const uint32_t op = w >> 26, rs = (w >> 21) & 31, rt = (w >> 16) & 31, funct = w & 0x3F;
+            const uint32_t op = w >> 26, rs = (w >> 21) & 31, funct = w & 0x3F;
             if ((op == 2) || (op == 3)) {
-                if (!in_code_ranges(((addr + 4) & 0xF0000000u) | ((w & 0x03FFFFFFu) << 2), code)) return true;
+                const uint32_t target = ((addr + 4) & 0xF0000000u) | ((w & 0x03FFFFFFu) << 2);
+                if (!in_code_ranges(target, code)) {
+                    uint32_t there = 0;
+                    if (!in_code_ranges(target, pack_writes) || !read_rdram_word(rdram, rdram_size, target, there) || (there == 0)) return true;
+                }
             }
             else if ((op == 0) && ((funct == 0x08) || (funct == 0x09))) {
                 if (rs != 31) return true;
             }
-            else if (((op >= 4) && (op <= 7)) || ((op >= 0x14) && (op <= 0x17)) || ((op == 1) && ((rt <= 3) || ((rt >= 0x10) && (rt <= 0x13)))) || ((op == 0x11) && (rs == 8))) {
+            else if (is_branch_word(w)) {
                 const uint32_t target = addr + 4 + uint32_t(int32_t(int16_t(w & 0xFFFF)) * 4);
                 if ((target < watch.func.vram) || (target >= (watch.func.vram + watch.func.size))) return true;
             }
@@ -128,10 +194,12 @@ namespace recomp::mods::live_codes {
     }
 
     ExitCheck check_exits(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size, std::span<const uint8_t> rom,
-        std::span<const CodeRange> all, std::span<const CodeRange> loaded)
+        std::span<const CodeRange> all, std::span<const CodeRange> loaded, std::span<const CodeRange> pack_writes)
     {
-        if (hooks_outside_code(watch, rdram, rdram_size, rom, all)) return ExitCheck::Never;
-        return hooks_outside_code(watch, rdram, rdram_size, rom, loaded) ? ExitCheck::NotNow : ExitCheck::Fine;
+        std::vector<CodeRange> known(all.begin(), all.end());
+        known.insert(known.end(), pack_writes.begin(), pack_writes.end());
+        if (hooks_outside_code(watch, rdram, rdram_size, rom, known)) return ExitCheck::Never;
+        return hooks_outside_code(watch, rdram, rdram_size, rom, loaded, pack_writes) ? ExitCheck::NotNow : ExitCheck::Fine;
     }
 
     uint64_t content_key(const Watch &watch, const uint8_t *rdram, uint32_t rdram_size) {
