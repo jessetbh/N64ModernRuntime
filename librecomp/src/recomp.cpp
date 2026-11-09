@@ -1193,8 +1193,7 @@ void recomp::start(
             // stays mapped and no static destructor runs under it. _Exit skips atexit; on Windows the OS
             // stops the other threads before any DLL detaches.
             fprintf(stderr, "[wcw] shutdown: ending the process now, a game thread is still running\n");
-            fflush(stdout);
-            fflush(stderr);
+            fflush(nullptr);   // every open stream: _Exit flushes none (diagnostic CSVs keep their tail)
             std::_Exit(0);
         });
 }
