@@ -274,6 +274,16 @@ TEST_CASE("live codes: units_writing keeps only the units that write the range, 
     CHECK(late.size() == 2);
     CHECK(units_writing(table, CodeRange{ 0x80400000u, 0x80400010u }).empty());
     CHECK(units_writing({ code(0xD1, 0x80000000u, 0) }, CodeRange{ 0x80000000u, 0x80000010u }).empty()); // dangling guard
+
+    // malformed repeaters: apply() skips the 50 together with the unit after it, so the refresh must not take that unit
+    const CodeRange r{ 0x80000000u, 0x80000010u };
+    CHECK(units_writing({ code(0x50, 0x0204u, 0), code(0xD1, 0x80000020u, 0), code(0x81, 0x80000000u, 1) }, r).empty());
+    CHECK(units_writing({ code(0x50, 0x0204u, 0), code(0x50, 0x0204u, 0), code(0x81, 0x80000000u, 1) }, r).empty());
+    const std::vector<Code> after = units_writing({ code(0x50, 0x0204u, 0), code(0xD1, 0x80000020u, 0), code(0x81, 0x80000000u, 1),
+                                                    code(0x81, 0x80000004u, 2) }, r);
+    CHECK(after.size() == 1);                 // the unit after the skipped one is read normally
+    if (after.size() == 1) CHECK(after[0].addr == 0x80000004u);
+    CHECK(units_writing({ code(0xD1, 0x80000020u, 0), code(0x50, 0x0204u, 0) }, r).empty()); // repeater at the end
 }
 
 TEST_CASE("live codes: a hook written in two halves is judged by the word it makes") {

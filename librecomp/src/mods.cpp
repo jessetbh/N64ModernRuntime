@@ -2642,7 +2642,9 @@ namespace {
             // may clear the RAM a pack's code sits in, so write that code again before entering it. Only the units that
             // write this stretch: the rest of the table writes game data, and writing that from inside a running
             // function, at a moment the game never sees a GameShark write, can break what the function is building.
-            {
+            // Never inside game code (a version re-entering mid-function at a hook site): that would write game code from
+            // inside a running function. Pack code lives outside the code sections.
+            if (!live_codes::in_code_ranges(a, live_code_ranges)) {
                 static std::mutex cave_mutex{};
                 static std::unordered_map<uint32_t, std::vector<recomp::mods::conversion::codes::Code>> cave_units{};
                 std::lock_guard lock{ cave_mutex };

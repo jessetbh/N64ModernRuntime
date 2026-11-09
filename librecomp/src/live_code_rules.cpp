@@ -80,6 +80,13 @@ namespace recomp::mods::live_codes {
                 }
                 last = i + 1;
             }
+            else if (c.type == 0x50) {
+                // a repeater before anything but a write isn't a GameShark form: apply() skips it with the unit after
+                // it, so that unit isn't taken either
+                size_t j = i + 1;
+                while ((j < codes.size()) && ((codes[j].type == 0x50) || ((codes[j].type >= 0xD0) && (codes[j].type <= 0xD3)))) j++;
+                last = std::min(j, codes.size() - 1);
+            }
             if (hits) {
                 out.insert(out.end(), codes.begin() + first, codes.begin() + last + 1);
             }
@@ -166,7 +173,7 @@ namespace recomp::mods::live_codes {
             }
 
             if (w == rom_word) continue;
-            const uint32_t op = w >> 26, rs = (w >> 21) & 31, rt = (w >> 16) & 31, funct = w & 0x3F;
+            const uint32_t op = w >> 26, rs = (w >> 21) & 31, funct = w & 0x3F;
             if ((op == 2) || (op == 3)) {
                 const uint32_t target = ((addr + 4) & 0xF0000000u) | ((w & 0x03FFFFFFu) << 2);
                 if (!in_code_ranges(target, code)) {
@@ -177,7 +184,7 @@ namespace recomp::mods::live_codes {
             else if ((op == 0) && ((funct == 0x08) || (funct == 0x09))) {
                 if (rs != 31) return true;
             }
-            else if (((op >= 4) && (op <= 7)) || ((op >= 0x14) && (op <= 0x17)) || ((op == 1) && ((rt <= 3) || ((rt >= 0x10) && (rt <= 0x13)))) || ((op == 0x11) && (rs == 8))) {
+            else if (is_branch_word(w)) {
                 const uint32_t target = addr + 4 + uint32_t(int32_t(int16_t(w & 0xFFFF)) * 4);
                 if ((target < watch.func.vram) || (target >= (watch.func.vram + watch.func.size))) return true;
             }
