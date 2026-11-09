@@ -293,6 +293,22 @@ TEST_CASE("rice: geometry of a tile load") {
     CHECK(computeGeometry(load, draw, g));
     CHECK_EQ(g.width, 32);
     CHECK_EQ(g.height, 8);
+
+    // aki-roadmap#204: a load that starts on a half texel. No Mercy draws a string texture in 64-px chunks; the second
+    // chunk loads (31.5,0)-(64,16) as 16-bit from an 88-byte-wide 8-bit image. Rice: ((lrs - uls) >> 2) + 1 = 33
+    // 16-bit texels (66 drawn), starting at byte 31; per-edge rounding gave 34 (68) and missed the pack's key.
+    load.siz = 2; load.textureSiz = 1;
+    load.uls = 0x07E; load.ult = 0; load.lrs = 0x100; load.lrt = 0x040;
+    load.textureWidth = 88;
+    CHECK(computeGeometry(load, draw, g));
+    CHECK_EQ(g.width, 66);
+    CHECK_EQ(g.height, 17);
+    CHECK_EQ(g.bytesPerRow, 88);
+    CHECK_EQ(g.rdramStart, 0x1000u + 31);
+    // Whole-texel edges are unchanged: the first chunk, (0,0)-(32,16), is 33 wide either way.
+    load.uls = 0; load.lrs = 0x080;
+    CHECK(computeGeometry(load, draw, g));
+    CHECK_EQ(g.width, 66);
 }
 
 TEST_CASE("rice: geometry of a block load, with and without dxt") {
