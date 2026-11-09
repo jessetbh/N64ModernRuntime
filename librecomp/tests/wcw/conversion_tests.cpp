@@ -347,3 +347,76 @@ TEST_CASE("conversion: another hack's patch never joins; the cheats engine needs
     on = session_enabled_mods({ "hack_patch" }, true, "aki_cheats", mods, c, {});
     CHECK(on.contains("aki_cheats"));            // runnable codes
 }
+
+// aki-roadmap#226: the models component.
+TEST_CASE("conversion: a models folder is a component of its own, inside the conversion folder (#226)") {
+    Conversion c;
+    std::string error;
+    const std::string models = R"json({ "format": "aki-conversion", "format_version": 1, "id": "roster_models", "game": "vpw2",
+        "components": { "models": { "dir": "models/" } } })json";
+    CHECK(parse(models, "roster_models", c, error));
+    CHECK(c.has_models && (c.models_dir == "models"));
+    CHECK(!c.has_patch && !c.has_codes);
+    CHECK(c.models_refusal.empty());
+
+    Conversion d;
+    CHECK(parse(Full, "nomercy_unlocked", d, error));
+    CHECK(!d.has_models && d.models_dir.empty());   // no component: the player's own packs, as before
+
+    const std::string empty = R"json({ "format": "aki-conversion", "format_version": 1, "id": "m", "game": "vpw2",
+        "components": { "models": { } } })json";
+    CHECK(!parse(empty, "", c, error));             // no dir and nothing else: no usable components
+
+    const std::string escape = R"json({ "format": "aki-conversion", "format_version": 1, "id": "m", "game": "vpw2",
+        "components": { "patch": { "file": "patch.nrm" }, "models": { "dir": "../mods/models" } } })json";
+    CHECK(!parse(escape, "", c, error));
+    CHECK(error.find("leaves the conversion folder") != std::string::npos);
+}
+
+TEST_CASE("conversion: models are refused beside a patch that uses the models window (#226)") {
+    // Plain patches carry no relink.json, and a de-relinked hack that moved nothing (VPW2 freem Edition) has empty lists.
+    CHECK(models_refusal("").empty());
+    CHECK(models_refusal(R"json({"format": 1, "base": "vpw2-rev0", "functions": [], "code_ranges": [], "data_ranges": []})json").empty());
+    // Born to be Wired / No Mercy Plus: code and data at 0x80400FE0..0x804A0000.
+    const std::string btbw = R"json({"code_ranges": [[2151682016, 2152333312], [2399141888, 2399193212]],
+        "data_ranges": [[2151682016, 2152333312, 1823168]], "preload": [{"rom": 1823168, "ram": 2151682016, "size": 651296}],
+        "zero": [{"ram": 2151678080, "size": 130900}]})json";
+    const std::string why = models_refusal(btbw);
+    CHECK(!why.empty());
+    CHECK(why.find("#156") != std::string::npos);
+    CHECK(why.find("0x80400FE0") != std::string::npos);  // the first range that overlaps, as the hack wrote it
+    // Legends / Showdown 64: code above 8 MB (fine) but a zeroed block at 0x80600000 (inside the window).
+    CHECK(!models_refusal(R"json({"code_ranges": [[2399141888, 2399146444]], "zero": [{"ram": 2153775104, "size": 6864}]})json").empty());
+    CHECK(models_refusal(R"json({"code_ranges": [[2399141888, 2399146444]]})json").empty());
+    // KSEG1 addresses compare physically; touching the window's edges from outside is fine.
+    CHECK(!models_refusal(R"json({"zero": [{"ram": 2689597440, "size": 16}]})json").empty());   // 0xA0500000
+    CHECK(models_refusal(R"json({"zero": [{"ram": 2147483648, "size": 4194304}]})json").empty());  // 0x80000000 + 4 MB ends at the window
+    CHECK(models_refusal(R"json({"code_ranges": [[2155872256, 2155872260]]})json").empty());      // 0x80800000: past it
+    CHECK(!models_refusal(R"json({"code_ranges": [[2155872252, 2155872256]]})json").empty());     // its last word
+    CHECK(models_refusal(R"json({"zero": [{"ram": 2151677952, "size": 0}]})json").empty());        // empty range
+    // Unknown memory use is refused too.
+    CHECK(!models_refusal("not json").empty());
+}
+
+TEST_CASE("conversion: a session with usable models turns on model import, refused models leave it to the add-on rules (#226)") {
+    const std::vector<PlayerMod> mods = {
+        { "aki_modelimport", true, false, false },  // installed (bundled), off in the player's setup
+        { "aki_camera", true, false, true },
+    };
+    Conversion c;
+    c.has_models = true;
+    c.models_dir = "models";
+    std::vector<std::string> why;
+    auto on = session_enabled_mods({ "hack_patch" }, false, "aki_cheats", mods, c, {}, &why);
+    CHECK(on.contains(ModelsModId));
+    CHECK(on.contains("hack_patch") && !on.contains("aki_camera"));
+    CHECK(why.size() == mods.size());           // still one line per player mod
+
+    c.models_refusal = "its patch uses Expansion RAM";
+    on = session_enabled_mods({ "hack_patch" }, false, "aki_cheats", mods, c, {});
+    CHECK(!on.contains(ModelsModId));           // not enabled by the player: stays off
+
+    Conversion none;                            // no models component: unchanged
+    on = session_enabled_mods({ "hack_patch" }, false, "aki_cheats", mods, none, {});
+    CHECK(!on.contains(ModelsModId));
+}

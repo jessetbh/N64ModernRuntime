@@ -272,9 +272,16 @@ namespace recomp::mods {
             }
         }
 
-        fprintf(stderr, "[conversion] running %s (\"%s\"):%s%s%s%s%s; saves in saves/%s\n", c.id.c_str(), c.name.c_str(),
+        if (c.has_models) {
+            std::error_code ec;
+            if (!std::filesystem::is_directory(folder / std::filesystem::u8path(c.models_dir), ec)) {
+                fprintf(stderr, "[conversion] models folder %s is missing; running without models\n", c.models_dir.c_str());
+            }
+        }
+
+        fprintf(stderr, "[conversion] running %s (\"%s\"):%s%s%s%s%s%s; saves in saves/%s\n", c.id.c_str(), c.name.c_str(),
             c.has_patch ? " patch" : "", c.has_codes ? " codes" : "", c.has_saves ? " saves" : "", c.has_textures ? " textures" : "",
-            c.has_rt ? " rt" : "", c.id.c_str());
+            c.has_rt ? " rt" : "", c.has_models ? " models" : "", c.id.c_str());
         active = std::move(c);
         active_folder = folder;
         return folders;
@@ -283,6 +290,21 @@ namespace recomp::mods {
     const conversion::Conversion *active_conversion() {
         std::lock_guard lock(conversion_mutex);
         return active ? &*active : nullptr;
+    }
+
+    void set_active_conversion_models_refusal(const std::string &reason) {
+        std::lock_guard lock(conversion_mutex);
+        if (active) {
+            active->models_refusal = reason;
+        }
+    }
+
+    std::filesystem::path active_conversion_models_dir() {
+        std::lock_guard lock(conversion_mutex);
+        if (!active || !active->has_models || !active->models_refusal.empty()) {
+            return {};
+        }
+        return active_folder / std::filesystem::u8path(active->models_dir);
     }
 
     std::string active_conversion_codes() {
