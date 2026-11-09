@@ -239,7 +239,8 @@ void recomp::mods::scan_mods() {
                     relink.assign(bytes.begin(), bytes.end());
                 }
             }
-            const std::string refusal = conversion::models_refusal(relink);
+            // A bad models component (parse) already says why; otherwise the patch's memory use decides.
+            const std::string refusal = active->models_refusal.empty() ? conversion::models_refusal(relink) : active->models_refusal;
             set_active_conversion_models_refusal(refusal);
             if (!refusal.empty()) {
                 fprintf(stderr, "[conversion] models refused: %s. Running without its models.\n", refusal.c_str());

@@ -277,6 +277,10 @@ namespace recomp::mods {
             if (!std::filesystem::is_directory(folder / std::filesystem::u8path(c.models_dir), ec)) {
                 fprintf(stderr, "[conversion] models folder %s is missing; running without models\n", c.models_dir.c_str());
             }
+            for (const conversion::Conversion::ModelSlot &s : c.models_slots) {
+                fprintf(stderr, "[conversion] model slot: wrestler 0x%04X%s%s -> %s\n", s.wrestler, s.name.empty() ? "" : " ",
+                    s.name.c_str(), s.pack.c_str());
+            }
         }
 
         fprintf(stderr, "[conversion] running %s (\"%s\"):%s%s%s%s%s%s; saves in saves/%s\n", c.id.c_str(), c.name.c_str(),
@@ -305,6 +309,15 @@ namespace recomp::mods {
             return {};
         }
         return active_folder / std::filesystem::u8path(active->models_dir);
+    }
+
+    bool active_conversion_models_txt(std::string &out) {
+        std::lock_guard lock(conversion_mutex);
+        if (!active || !active->has_models || !active->models_refusal.empty() || !active->models_has_slots) {
+            return false;
+        }
+        out = conversion::models_txt(active->models_slots);
+        return true;
     }
 
     std::string active_conversion_codes() {

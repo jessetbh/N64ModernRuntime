@@ -420,3 +420,60 @@ TEST_CASE("conversion: a session with usable models turns on model import, refus
     on = session_enabled_mods({ "hack_patch" }, false, "aki_cheats", mods, none, {});
     CHECK(!on.contains(ModelsModId));
 }
+
+TEST_CASE("conversion: models slots name the hack's wrestlers and become the host's models.txt (#226)") {
+    Conversion c;
+    std::string error;
+    const std::string slots = R"json({ "format": "aki-conversion", "format_version": 1, "id": "aew", "game": "nomercy",
+        "components": { "models": { "dir": "models", "format": 2, "roster": "models/roster.json", "slots": [
+            { "wrestler": "0x0404", "name": "Kenny Omega", "costume": 0, "pack": "kenny" },
+            { "wrestler": "302", "name": "Jon Moxley", "pack": "mox" },
+            { "wrestler": 7, "pack": "q-robot" } ] } } })json";
+    CHECK(parse(slots, "aew", c, error));
+    CHECK(c.has_models && c.models_has_slots && c.models_refusal.empty());
+    CHECK(c.models_format == 2);
+    CHECK(c.models_roster == "models/roster.json");
+    CHECK(c.models_slots.size() == 3);
+    CHECK((c.models_slots[0].wrestler == 0x0404) && (c.models_slots[0].costume == 0) && (c.models_slots[0].name == "Kenny Omega"));
+    CHECK((c.models_slots[1].wrestler == 0x0302) && (c.models_slots[1].costume == -1));
+    CHECK(c.models_slots[2].wrestler == 7);
+    CHECK(models_txt(c.models_slots) == "# from aki.json components.models.slots\n"
+        "kenny wrestler 0x0404 costume 0\nmox wrestler 0x0302\nq-robot wrestler 0x0007\n");
+
+    // No format: the first version; no slots: dir/models.txt is read as it is.
+    const std::string plain = R"json({ "format": "aki-conversion", "format_version": 1, "id": "m", "game": "vpw2",
+        "components": { "models": { "dir": "models" } } })json";
+    CHECK(parse(plain, "", c, error));
+    CHECK((c.models_format == 1) && !c.models_has_slots && c.models_refusal.empty());
+}
+
+TEST_CASE("conversion: a newer model format or a bad slot turns the models off with a reason, the conversion still runs (#226)") {
+    auto with = [](const std::string &models) {
+        return R"json({ "format": "aki-conversion", "format_version": 1, "id": "m", "game": "nomercy",
+            "components": { "patch": { "file": "patch.nrm" }, "models": )json" + models + " } }";
+    };
+    Conversion c;
+    std::string error;
+    CHECK(parse(with(R"json({ "dir": "models", "format": 3 })json"), "", c, error));
+    CHECK(c.has_patch && c.has_models);
+    CHECK(c.models_refusal.find("format 3") != std::string::npos);
+    CHECK(c.models_refusal.find("update the game") != std::string::npos);
+
+    CHECK(parse(with(R"json({ "dir": "models", "format": "two" })json"), "", c, error));
+    CHECK(c.models_refusal.find("\"format\"") != std::string::npos);
+
+    for (const char *bad : { R"json([{ "pack": "kenny" }])json", R"json([{ "wrestler": "0x10000", "pack": "kenny" }])json",
+             R"json([{ "wrestler": "0x0404", "pack": "../kenny" }])json", R"json([{ "wrestler": "0x0404", "pack": "kenny", "costume": -1 }])json",
+             R"json([{ "wrestler": "zz", "pack": "kenny" }])json", R"json("kenny")json" }) {
+        CHECK(parse(with(std::string(R"json({ "dir": "models", "slots": )json") + bad + " }"), "", c, error));
+        CHECK(!c.models_refusal.empty());
+        CHECK(c.models_slots.empty());
+    }
+
+    // The session leaves model import to the add-on rules then, as for a relinked patch.
+    const std::vector<PlayerMod> mods = { { "aki_modelimport", true, false, false } };
+    CHECK(!session_enabled_mods({ "m" }, false, "aki_cheats", mods, c, {}).contains(ModelsModId));
+
+    // The roster path stays inside the conversion folder.
+    CHECK(!parse(with(R"json({ "dir": "models", "roster": "../roster.json" })json"), "", c, error));
+}

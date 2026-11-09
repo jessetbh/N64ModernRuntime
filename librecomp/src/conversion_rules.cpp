@@ -21,6 +21,112 @@ namespace recomp::mods::conversion {
         return true;
     }
 
+    namespace {
+        bool pack_id_ok(const std::string &id) {
+            if (id.empty() || (id.size() > 64) || (id[0] == '.')) {
+                return false;
+            }
+            for (char ch : id) {
+                if (!(((ch >= 'a') && (ch <= 'z')) || ((ch >= 'A') && (ch <= 'Z')) || ((ch >= '0') && (ch <= '9')) ||
+                      (ch == '_') || (ch == '-') || (ch == '.'))) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // "0x0404", "404" (hex, as models.txt and the roster tools write them) or a number.
+        bool wrestler_id(const nlohmann::json &v, uint32_t &out) {
+            if (v.is_number_unsigned()) {
+                out = v.get<uint32_t>();
+                return out <= 0xFFFF;
+            }
+            if (!v.is_string()) {
+                return false;
+            }
+            std::string s = v.get<std::string>();
+            if ((s.size() > 2) && (s[0] == '0') && ((s[1] == 'x') || (s[1] == 'X'))) {
+                s = s.substr(2);
+            }
+            if (s.empty() || (s.size() > 4) || (s.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)) {
+                return false;
+            }
+            out = uint32_t(std::stoul(s, nullptr, 16));
+            return true;
+        }
+
+        // components.models into c. A bad dir leaves has_models false; a bad format or slot keeps the component
+        // (the conversion still runs) with models_refusal saying why its models are off.
+        void parse_models(const nlohmann::json &models, Conversion &c) {
+            if (!models.is_object()) {
+                return;
+            }
+            c.models_dir = models.value("dir", std::string());
+            while (!c.models_dir.empty() && ((c.models_dir.back() == '/') || (c.models_dir.back() == '\\'))) {
+                c.models_dir.pop_back();
+            }
+            c.has_models = !c.models_dir.empty();
+            if (!c.has_models) {
+                return;
+            }
+            const auto format = models.find("format");
+            c.models_format = (format == models.end()) ? 1 : (format->is_number_integer() ? format->get<int>() : -1);
+            c.models_roster = models.value("roster", std::string());
+            if (c.models_format < 1) {
+                c.models_refusal = "its models component has no usable \"format\" (the model pack version, 1 to " +
+                    std::to_string(ModelsFormat) + ")";
+                return;
+            }
+            if (c.models_format > ModelsFormat) {
+                c.models_refusal = "its models are format " + std::to_string(c.models_format) + ", and this build reads up to " +
+                    std::to_string(ModelsFormat) + ": update the game";
+                return;
+            }
+            const auto slots = models.find("slots");
+            if (slots == models.end()) {
+                return;
+            }
+            c.models_has_slots = true;
+            if (!slots->is_array()) {
+                c.models_refusal = "its models \"slots\" is not a list";
+                return;
+            }
+            for (size_t i = 0; i < slots->size(); i++) {
+                const nlohmann::json &s = (*slots)[i];
+                Conversion::ModelSlot slot;
+                const auto wrestler = s.is_object() ? s.find("wrestler") : s.end();
+                const auto costume = s.is_object() ? s.find("costume") : s.end();
+                const bool ok = s.is_object() && (wrestler != s.end()) && wrestler_id(*wrestler, slot.wrestler) &&
+                    ((costume == s.end()) || (costume->is_number_integer() && (costume->get<int>() >= 0) && (costume->get<int>() < 256)));
+                slot.pack = ok ? s.value("pack", std::string()) : std::string();
+                if (!ok || !pack_id_ok(slot.pack)) {
+                    c.models_refusal = "its models slot " + std::to_string(i + 1) + " needs a wrestler id (\"0x0404\"), a pack id and "
+                        "an optional costume 0-255";
+                    c.models_slots.clear();
+                    return;
+                }
+                slot.costume = (costume == s.end()) ? -1 : costume->get<int>();
+                slot.name = s.value("name", std::string());
+                c.models_slots.push_back(std::move(slot));
+            }
+        }
+    }
+
+    std::string models_txt(const std::vector<Conversion::ModelSlot> &slots) {
+        std::string out = "# from aki.json components.models.slots\n";
+        char line[160];
+        for (const Conversion::ModelSlot &s : slots) {
+            if (s.costume >= 0) {
+                snprintf(line, sizeof(line), "%s wrestler 0x%04X costume %d\n", s.pack.c_str(), s.wrestler, s.costume);
+            }
+            else {
+                snprintf(line, sizeof(line), "%s wrestler 0x%04X\n", s.pack.c_str(), s.wrestler);
+            }
+            out += line;
+        }
+        return out;
+    }
+
     bool parse(const std::string &json_text, const std::string &expected_id, Conversion &out, std::string &error) {
         using json = nlohmann::json;
         const json root = json::parse(json_text, nullptr, false);
@@ -90,11 +196,7 @@ namespace recomp::mods::conversion {
         }
 
         if (const json *models = object("models")) {
-            c.models_dir = models->is_object() ? models->value("dir", std::string()) : std::string();
-            while (!c.models_dir.empty() && ((c.models_dir.back() == '/') || (c.models_dir.back() == '\\'))) {
-                c.models_dir.pop_back();
-            }
-            c.has_models = !c.models_dir.empty();
+            parse_models(*models, c);
         }
 
         if (const auto addons = root.find("addons"); addons != root.end() && addons->is_object()) {
@@ -111,7 +213,7 @@ namespace recomp::mods::conversion {
         }
 
         // Paths stay inside the conversion folder.
-        for (const std::string *path : { &c.codes_file, &c.textures_dir, &c.rt_lights_file, &c.rt_materials_file, &c.models_dir }) {
+        for (const std::string *path : { &c.codes_file, &c.textures_dir, &c.rt_lights_file, &c.rt_materials_file, &c.models_dir, &c.models_roster }) {
             if ((path->find("..") != std::string::npos) || (!path->empty() && ((path->front() == '/') || (path->front() == '\\') ||
                 (path->find(':') != std::string::npos)))) {
                 error = "path leaves the conversion folder: " + *path;
