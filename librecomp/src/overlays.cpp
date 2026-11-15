@@ -545,7 +545,9 @@ extern "C" void wcw_print_lookup_history() {
     fprintf(stderr, "\n");
 }
 
-extern "C" recomp_func_t * get_function(int32_t addr) {
+// [wcw fullconv] get_function without ending the game: null for an address nothing resolves (the live recompiler's
+// jr $ra to a hack's constant return address falls back to a plain return then; N64Recomp constant_ra.h).
+extern "C" recomp_func_t* wcw_find_function(int32_t addr) {
     lookup_history[lookup_history_pos++ & 15] = (uint32_t)addr;
     auto func_find = func_map.find(addr);
     if (func_find == func_map.end() && missing_function_handler != nullptr) {
@@ -561,6 +563,14 @@ extern "C" recomp_func_t * get_function(int32_t addr) {
         }
     }
     if (func_find == func_map.end()) {
+        return nullptr;
+    }
+    return func_find->second;
+}
+
+extern "C" recomp_func_t * get_function(int32_t addr) {
+    recomp_func_t* func = wcw_find_function(addr);
+    if (func == nullptr) {
         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
         fprintf(stderr, "  this thread's previous lookups (oldest first):");
         for (uint32_t i = 1; i < 16; i++) {
@@ -570,7 +580,7 @@ extern "C" recomp_func_t * get_function(int32_t addr) {
         assert(false);
         std::exit(EXIT_FAILURE);
     }
-    return func_find->second;
+    return func;
 }
 
 std::unordered_map<recomp_func_t*, recomp::overlays::BasePatchedFunction> recomp::overlays::get_base_patched_funcs() {

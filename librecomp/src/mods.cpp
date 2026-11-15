@@ -52,6 +52,8 @@ void recomp::mods::register_entry_prologues(std::span<const EntryPrologue> prolo
 
 // [wcw fullconv] The live generator's entry/return hook call: a mod's hook slot, or a prologue (with or without a
 // mod's slot; the mod's hook runs first, as it would ahead of the static function's body).
+extern "C" recomp_func_t* wcw_find_function(int32_t addr); // overlays.cpp
+
 static void run_entry_hook(uint8_t* rdram, recomp_context* ctx, size_t hook_index) {
     namespace ep = recomp::mods::entry_prologues;
     const ep::Decoded d = ep::decode(hook_index);
@@ -555,7 +557,8 @@ recomp::mods::LiveRecompilerCodeHandle::LiveRecompilerCodeHandle(
         .run_hook = run_entry_hook, // [wcw fullconv] mod hook slots and the port's entry prologues
         .entry_func_hooks = std::move(entry_func_hooks),
         .return_func_hooks = std::move(return_func_hooks),
-        .original_section_indices = std::move(original_section_indices)
+        .original_section_indices = std::move(original_section_indices),
+        .find_function = wcw_find_function, // [wcw fullconv] a hack's constant return address (N64Recomp constant_ra.h)
     };
 
     N64Recomp::LiveGenerator generator{ context.functions.size(), recompiler_inputs };

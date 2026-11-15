@@ -184,14 +184,34 @@ TEST_CASE("constant_ra_pair_finds_a_hacks_fake_return_address") {
     CHECK(!constant_ra_pair(0x3C1F8011u, 0x8FBF0024u, v));         // lw $ra, 0x24($sp)
 }
 
-TEST_CASE("take_constant_ra_jumps_once_and_any_jr_ra_disarms") {
+TEST_CASE("constant_ra_pair_edges") {
+    using N64Recomp::constant_ra_pair;
+    uint32_t v = 0;
+    CHECK(constant_ra_pair(0x3C1F8080u, 0x27FFFFFCu, v));          // 0x807FFFFC: the last code address taken
+    CHECK(v == 0x807FFFFCu);
+    CHECK(!constant_ra_pair(0x3C1F8080u, 0x27FF0000u, v));         // 0x80800000: past RDRAM
+    CHECK(!constant_ra_pair(0x3C3F8011u, 0x27FFF8FCu, v));         // rs set in the lui: not a plain lui
+}
+
+TEST_CASE("take_constant_ra_matches_the_noting_frame_only") {
     using namespace N64Recomp;
+    const uintptr_t frame = 0x1000, deeper = 0x0F00, shallower = 0x1100;
     ConstantRa s{};
-    CHECK(!take_constant_ra(s, 0x8010F8FCu));                      // nothing noted: a plain return
-    note_constant_ra(s, 0x8010F8FCu);
-    CHECK(take_constant_ra(s, 0x8010F8FCu));                       // ra still the constant: jump there
-    CHECK(!take_constant_ra(s, 0x8010F8FCu));                      // taken: the next jr ra is a return again
-    note_constant_ra(s, 0x8010F8FCu);
-    CHECK(!take_constant_ra(s, 0x80026A20u));                      // ra changed since: a return...
-    CHECK(!take_constant_ra(s, 0x8010F8FCu));                      // ...and the note is gone
+    CHECK(!take_constant_ra(s, 0x8010F8FCu, frame));               // nothing noted: a plain return
+    note_constant_ra(s, 0x8010F8FCu, frame);
+    CHECK(take_constant_ra(s, 0x8010F8FCu, frame));                // same frame (the hack's j chain), ra = T: jump
+    CHECK(!take_constant_ra(s, 0x8010F8FCu, frame));               // taken: the next jr ra is a return again
+    // A function called from the noting one (calls don't write ra, so it still sees T) returns normally and keeps
+    // the note for the noting frame's own jr ra.
+    note_constant_ra(s, 0x8010F8FCu, frame);
+    CHECK(!take_constant_ra(s, 0x8010F8FCu, deeper));
+    CHECK(take_constant_ra(s, 0x8010F8FCu, frame));
+    // ra changed since: a return, and the note is gone
+    note_constant_ra(s, 0x8010F8FCu, frame);
+    CHECK(!take_constant_ra(s, 0x80026A20u, frame));
+    CHECK(!take_constant_ra(s, 0x8010F8FCu, frame));
+    // the noting frame returned another way: a shallower jr ra drops the note, even with ra still T
+    note_constant_ra(s, 0x8010F8FCu, frame);
+    CHECK(!take_constant_ra(s, 0x8010F8FCu, shallower));
+    CHECK(!take_constant_ra(s, 0x8010F8FCu, frame));
 }
