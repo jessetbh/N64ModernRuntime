@@ -454,8 +454,7 @@ namespace recomp::mods {
             apply_native_codes_now(rdram, RetraceRdramSize);
             retrace_gate.on_retrace(steady_ms());
             if (retrace_gate.retrace_count() == 1) {
-                fprintf(stderr, "[conversion] codes: now applied once per VI retrace (aki-roadmap#324)
-");
+                fprintf(stderr, "[conversion] codes: now applied once per VI retrace (aki-roadmap#324)\n");
             }
         }
     }
