@@ -526,6 +526,18 @@ extern "C" s32 osRecvMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, s32 
     // Try to receive a message.
     bool received = do_recv(PASS_RDRAM mq_, msg_, flags == OS_MESG_BLOCK);
 
+    // [wcw] aki-roadmap#324: the VI retrace message, received on this game thread: a conversion's codes run here, once
+    // per retrace (Project64 applies cheats on every VI interrupt). Only while librecomp has set the hook.
+    if (received && (msg_ != NULLPTR)) {
+        if (ultramodern::retrace_hook_t* hook = ultramodern::get_retrace_hook()) {
+            uint32_t vi_queue = 0, vi_message = 0;
+            ultramodern::get_vi_event(vi_queue, vi_message);
+            if ((vi_queue != 0) && ((uint32_t)mq_ == vi_queue) && ((uint32_t)*TO_PTR(OSMesg, msg_) == vi_message)) {
+                hook(PASS_RDRAM1);
+            }
+        }
+    }
+
     // Check the queue to see if this thread should swap execution to another.
     ultramodern::check_running_queue(PASS_RDRAM1);
 

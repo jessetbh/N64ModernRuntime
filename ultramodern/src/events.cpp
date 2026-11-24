@@ -205,6 +205,17 @@ extern "C" void osViSetEvent(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, u32 ret
 
 uint64_t total_vis = 0;
 
+// [wcw] aki-roadmap#324 (ultramodern.hpp).
+static std::atomic<ultramodern::retrace_hook_t*> wcw_retrace_hook{ nullptr };
+void ultramodern::set_retrace_hook(retrace_hook_t* hook) { wcw_retrace_hook.store(hook); }
+ultramodern::retrace_hook_t* ultramodern::get_retrace_hook() { return wcw_retrace_hook.load(); }
+void ultramodern::get_vi_event(uint32_t& queue, uint32_t& message) {
+    std::lock_guard lock{ events_context.message_mutex };
+    ViState* cur_state = events_context.vi.get_cur_state();
+    queue = (uint32_t)cur_state->mq;
+    message = (uint32_t)cur_state->msg;
+}
+
 
 extern std::atomic_bool exited;
 extern moodycamel::LightweightSemaphore graphics_shutdown_ready;
