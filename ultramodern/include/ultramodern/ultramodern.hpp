@@ -137,6 +137,19 @@ struct gfx_callbacks_t {
 };
 
 bool is_game_started();
+// [wcw] aki-roadmap#324: called on the game thread that receives the VI retrace message (the queue and message
+// osViSetEvent registered), once per retrace, before osRecvMesg returns: where Project64 applies cheats (every VI
+// interrupt). nullptr (the default) = nothing; librecomp sets it only while a conversion's codes run.
+using retrace_hook_t = void(uint8_t* rdram);
+void set_retrace_hook(retrace_hook_t* hook);
+retrace_hook_t* get_retrace_hook();
+// The current retrace registration (queue 0 = none); an atomic copy osViSetEvent keeps, no lock.
+void get_vi_event(uint32_t& queue, uint32_t& message);
+// A message a game thread received is the VI retrace event: the registered queue and message (queue 0 = none).
+// Shared by osRecvMesg and librecomp's tests (retrace_codes_rules_tests.cpp).
+inline bool is_vi_retrace_message(uint32_t queue, uint32_t message, uint32_t vi_queue, uint32_t vi_message) {
+    return (vi_queue != 0) && (queue == vi_queue) && (message == vi_message);
+}
 void quit();
 void join_event_threads();
 void join_thread_cleaner_thread();

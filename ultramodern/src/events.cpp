@@ -184,6 +184,17 @@ extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_,
     }
 }
 
+// [wcw] aki-roadmap#324 (ultramodern.hpp).
+static std::atomic<ultramodern::retrace_hook_t*> wcw_retrace_hook{ nullptr };
+void ultramodern::set_retrace_hook(retrace_hook_t* hook) { wcw_retrace_hook.store(hook); }
+ultramodern::retrace_hook_t* ultramodern::get_retrace_hook() { return wcw_retrace_hook.load(); }
+static std::atomic<uint64_t> wcw_vi_event{ 0 };   // (queue << 32) | message, as osViSetEvent last registered
+void ultramodern::get_vi_event(uint32_t& queue, uint32_t& message) {
+    const uint64_t v = wcw_vi_event.load();
+    queue = (uint32_t)(v >> 32);
+    message = (uint32_t)v;
+}
+
 extern "C" void osViSetEvent(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, u32 retrace_count) {
     std::lock_guard lock{ events_context.message_mutex };
     // [wcw fix] the retrace event registration is global on real hardware (latest osViSetEvent
@@ -199,11 +210,13 @@ extern "C" void osViSetEvent(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, u32 ret
     cur_state->mq = mq_;
     cur_state->msg = msg;
     cur_state->retrace_count = retrace_count;
+    wcw_vi_event.store(((uint64_t)(uint32_t)mq_ << 32) | (uint32_t)msg);   // aki-roadmap#324 (get_vi_event)
     fprintf(stderr, "[wcw][osViSetEvent] mq=0x%X msg=0x%X retrace_count=%u\n",
         (unsigned)(uint32_t)mq_, (unsigned)(uint32_t)msg, retrace_count);
 }
 
 uint64_t total_vis = 0;
+
 
 
 extern std::atomic_bool exited;
