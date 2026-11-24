@@ -428,7 +428,7 @@ namespace recomp::mods {
     }
 
     namespace {
-        void apply_native_codes_now(uint8_t *rdram, uint32_t rdram_size) {
+        void apply_native_codes_now(uint8_t *rdram, uint32_t rdram_size, bool live_pass = true) {
             // Packs are tested on lenient emulators, and their codes can drive the game down paths stock never takes: Some No
             // Mercy Mod's Better Managers makes a manager act, whose target slot is 0xFFFF, and stock code then reads through a
             // null pointer (aki-roadmap#194). As for de-relinked hacks, the low user segment reads as zero pages. Stock games,
@@ -436,7 +436,9 @@ namespace recomp::mods {
             static std::once_flag low_segment_once;
             std::call_once(low_segment_once, [rdram]() { wcw_commit_low_user_segment(rdram); });
             conversion::codes::apply(native_codes, rdram, rdram_size);
-            live_codes::after_apply(native_codes, rdram, rdram_size);
+            if (live_pass) {
+                live_codes::after_apply(native_codes, rdram, rdram_size);
+            }
         }
 
         // aki-roadmap#324: the codes once per VI retrace (retrace_codes_rules.hpp), on the game thread that takes the
@@ -451,10 +453,12 @@ namespace recomp::mods {
 
         void apply_native_codes_on_retrace(uint8_t *rdram) {
             std::lock_guard lock(retrace_mutex);
-            apply_native_codes_now(rdram, RetraceRdramSize);
+            // The writes only: the live-code pass (recompiling code the pack writes) stays on the frame path, once a frame,
+            // so it never holds up the scheduler thread that takes the retrace message.
+            apply_native_codes_now(rdram, RetraceRdramSize, false);
             retrace_gate.on_retrace(steady_ms());
             if (retrace_gate.retrace_count() == 1) {
-                fprintf(stderr, "[conversion] codes: now applied once per VI retrace (aki-roadmap#324)\n");
+                fprintf(stderr, "[conversion] codes: now applied on every VI retrace message (aki-roadmap#324)\n");
             }
         }
     }
@@ -470,6 +474,9 @@ namespace recomp::mods {
             std::lock_guard lock(retrace_mutex);
             if (per_frame_only || retrace_gate.frame_should_apply(steady_ms())) {
                 apply_native_codes_now(rdram, rdram_size);
+            }
+            else {
+                live_codes::after_apply(native_codes, rdram, rdram_size);   // the writes came with the retraces
             }
         }
     }

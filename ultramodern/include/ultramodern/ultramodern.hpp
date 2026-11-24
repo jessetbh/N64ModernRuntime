@@ -143,8 +143,13 @@ bool is_game_started();
 using retrace_hook_t = void(uint8_t* rdram);
 void set_retrace_hook(retrace_hook_t* hook);
 retrace_hook_t* get_retrace_hook();
-// The current retrace registration (queue 0 = none).
+// The current retrace registration (queue 0 = none); an atomic copy osViSetEvent keeps, no lock.
 void get_vi_event(uint32_t& queue, uint32_t& message);
+// A message a game thread received is the VI retrace event: the registered queue and message (queue 0 = none).
+// Shared by osRecvMesg and librecomp's tests (retrace_codes_rules_tests.cpp).
+inline bool is_vi_retrace_message(uint32_t queue, uint32_t message, uint32_t vi_queue, uint32_t vi_message) {
+    return (vi_queue != 0) && (queue == vi_queue) && (message == vi_message);
+}
 void quit();
 void join_event_threads();
 void join_thread_cleaner_thread();

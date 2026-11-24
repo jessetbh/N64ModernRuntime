@@ -15,7 +15,7 @@
 
 namespace recomp::retrace_codes {
     // A message a game thread received is the VI retrace event: the queue and message osViSetEvent registered. No
-    // registration (queue 0) is never a retrace.
+    // registration (queue 0) is never a retrace. (ultramodern::is_vi_retrace_message, which osRecvMesg calls.)
     bool is_retrace(uint32_t queue, uint32_t message, uint32_t vi_queue, uint32_t vi_message);
 
     // The frame hook (the cheats mod's call) runs the codes only while retraces aren't: so a game that never registers a
