@@ -527,7 +527,7 @@ extern "C" s32 osRecvMesg(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, s32 
     bool received = do_recv(PASS_RDRAM mq_, msg_, flags == OS_MESG_BLOCK);
 
     // [wcw] aki-roadmap#324: the VI retrace message, received on this game thread: a conversion's codes run here, once
-    // per retrace (Project64 applies cheats on every VI interrupt). Only while librecomp has set the hook.
+    // per VI retrace message (Project64 applies cheats on every VI interrupt). Only while librecomp has set the hook.
     // (A wait with no message pointer still counts: the message it took is the slot before the queue's first.)
     if (received) {
         if (ultramodern::retrace_hook_t* hook = ultramodern::get_retrace_hook()) {

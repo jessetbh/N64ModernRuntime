@@ -2,7 +2,7 @@
 // librecomp
 //
 
-// [wcw] Unit tests for librecomp/retrace_codes_rules (aki-roadmap#324): conversion codes once per VI retrace.
+// [wcw] Unit tests for librecomp/retrace_codes_rules (aki-roadmap#324): conversion codes on every VI retrace message.
 
 #include "librecomp/retrace_codes_rules.hpp"
 #include "ultramodern/ultramodern.hpp"
